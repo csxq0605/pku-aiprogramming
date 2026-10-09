@@ -13,7 +13,11 @@ if [ -z "$PYBIND11_INCLUDE" ]; then
     PYBIND11_INCLUDE=$($PYTHON -c "import pybind11; print(pybind11.get_include())" 2>/dev/null || echo "pybind11/include")
 fi
 
-FLAGS="-O3 -std=c++17 --default-stream per-thread -diag-suppress 20281 -arch=$ARCH -Xcompiler -fPIC -I$PY_INCLUDE -I$PYBIND11_INCLUDE -Isrc"
+# CUDA 13 起模板 kernel 的主机端入口默认只在本文件可见，而 Tinytensor.cu 会调用 TinyTensor_kernels.cu 里的模板 kernel
+EXTRA=""
+NVCC_MAJOR=$($NVCC --version | grep -o "release [0-9]*" | grep -o "[0-9]*$")
+if [ "${NVCC_MAJOR:-0}" -ge 13 ]; then EXTRA="-static-global-template-stub=false"; fi
+FLAGS="$EXTRA -O3 -std=c++17 --default-stream per-thread -diag-suppress 20281 -arch=$ARCH -Xcompiler -fPIC -I$PY_INCLUDE -I$PYBIND11_INCLUDE -Isrc"
 mkdir -p build/obj/nn
 
 compile() {
