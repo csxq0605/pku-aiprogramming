@@ -608,16 +608,15 @@ class Softmaxloss(TensorOp):
         self.batchsize = self.labels.shape[0]
 
     def compute(self, z):
-        z_exp = np.exp(z - np.max(z, axis=1, keepdims=True))
-        z = z_exp / np.sum(z_exp, axis=1, keepdims=True)
-        self.softmax = z
-        error = np.sum(z.argmax(axis=1) != self.labels) / (self.batchsize*10)
-        loss = 0.0
-        for i in range(self.batchsize):
-            logits = z[i]
-            logits = logits - np.max(logits)
-            correct_logit = logits[self.labels[i]]
-            loss += np.log(np.sum(np.exp(logits - correct_logit))) / (self.batchsize*10)
+        # 损失 = 批均值交叉熵 mean_i(logsumexp(z_i) - z_i[y_i])，直接在 logits 上算（先减行最大值防溢出），
+        # 与 gradient 的 (softmax - onehot) / batchsize 是同一个目标。
+        shifted = z - np.max(z, axis=1, keepdims=True)
+        z_exp = np.exp(shifted)
+        sum_exp = np.sum(z_exp, axis=1, keepdims=True)
+        self.softmax = z_exp / sum_exp
+        error = np.sum(self.softmax.argmax(axis=1) != self.labels) / (self.batchsize*10)
+        correct = shifted[np.arange(self.batchsize), self.labels]
+        loss = np.mean(np.log(sum_exp[:, 0]) - correct)
         return loss, error
     
     def gradient(self, out_grad, node):
