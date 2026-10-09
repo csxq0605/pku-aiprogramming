@@ -100,24 +100,27 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
         ktiles = nr * ns * (p.kg / BK);
     }
 
-    // FWD / DGRAD 的 A 每个线程固定负责 A_CHUNKS 行：预先把行号拆成 (n, h, w)
-    int a_n[A_CHUNKS], a_h[A_CHUNKS], a_w[A_CHUNKS];
-    bool a_ok[A_CHUNKS];
+    // FWD / DGRAD 的 A 每个线程固定负责 A_CHUNKS 行：预先把行号拆成 (n, h, w)。
+    // h、w 压进一个 int 的高低 16 位（省寄存器，大 tile 每个线程有 8 行）；越界的行 h 取 -16384，后面的边界检查必然不过
+    int a_n[A_CHUNKS], a_hw[A_CHUNKS];
     if (A_RK){
         #pragma unroll
         for (int i = 0; i < A_CHUNKS; ++i){
             int m = m0 + ((tid + i * THREADS) >> 2);
-            a_ok[i] = m < p.gm;
-            int mm = a_ok[i] ? m : 0;
+            const bool ok = m < p.gm;
+            int mm = ok ? m : 0, h, w;
             if (MODE == FWD){
                 int ow = mm % g.q; int t = mm / g.q; int oh = t % g.p;
-                a_n[i] = t / g.p; a_h[i] = oh * g.stride_h - g.pad_h; a_w[i] = ow * g.stride_w - g.pad_w;
+                h = oh * g.stride_h - g.pad_h; w = ow * g.stride_w - g.pad_w;
+                a_n[i] = (t / g.p * g.h + h) * g.w + w;   // FWD：存左上角像素的下标（可能越界，只在检查通过后使用）
             }
             else{
+                // 第 (ti, tj) 个有效抽头对应 dy 的 (oh, ow) = (ih + ch - ti, iw + cw - tj)，ch = (ph_h + pad_h - r0) / sh 整除
                 int iw = mm % Wp; int t = mm / Wp; int ih = t % Hp;
-                a_n[i] = t / Hp;
-                a_h[i] = ih * g.stride_h + ph_h + g.pad_h; a_w[i] = iw * g.stride_w + ph_w + g.pad_w;
+                h = ih + (ph_h + g.pad_h - r0) / g.stride_h; w = iw + (ph_w + g.pad_w - s0) / g.stride_w;
+                a_n[i] = (t / Hp * g.p + h) * g.q + w;
             }
+            a_hw[i] = (ok ? h : -16384) * 65536 + (w & 0xffff);
         }
     }
 
@@ -135,11 +138,12 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
     // 第 kt 个 K 方向的 tile：FWD / WGRAD 是 [k0, k0 + BK)；DGRAD 是第 tap 个有效抽头的第 cbase 个通道起的 BK 个通道
     auto load_tile = [&](int stage, int kt){
         const int k0 = k_begin + kt * BK;
-        int tap_r = 0, tap_s = 0, tap_c = 0;
+        int tap_r = 0, tap_s = 0, tap_c = 0, tap_i = 0, tap_j = 0;
         if (MODE == DGRAD){
             const int tpt = p.kg / BK, ti = kt / tpt;
             tap_c = (kt % tpt) * BK;
-            tap_r = r0 + (ti / ns) * g.stride_h; tap_s = s0 + (ti % ns) * g.stride_w;
+            tap_i = ti / ns; tap_j = ti % ns;
+            tap_r = r0 + tap_i * g.stride_h; tap_s = s0 + tap_j * g.stride_w;
         }
         bf16* as = As + stage * BM * BK;
         bf16* bs = Bs + stage * BN * BK;
@@ -149,22 +153,22 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
             const int cbase = MODE == FWD ? k0 % p.cg : tap_c;
             const int rs = k0 / p.cg;
             const int s = MODE == FWD ? rs % g.s : tap_s, r = MODE == FWD ? rs / g.s : tap_r;
+            const int rws = MODE == FWD ? r * g.w + s : -(tap_i * g.q + tap_j);
             #pragma unroll
             for (int i = 0; i < A_CHUNKS; ++i){
                 int id = tid + i * THREADS, row = id >> 2, kc = id & 3;
                 const bf16* src = a;
-                bool ok = a_ok[i];
+                const int ah = a_hw[i] >> 16, aw = (short)(a_hw[i] & 0xffff);
+                bool ok;
                 if (MODE == FWD){
-                    int ih = a_h[i] + r, iw = a_w[i] + s;
-                    ok = ok && ih >= 0 && ih < g.h && iw >= 0 && iw < g.w;
-                    if (ok) src = a + (((size_t)a_n[i] * g.h + ih) * g.w + iw) * g.c + group * p.cg + cbase + kc * 8;
+                    int ih = ah + r, iw = aw + s;
+                    ok = ih >= 0 && ih < g.h && iw >= 0 && iw < g.w;
+                    if (ok) src = a + (size_t)(a_n[i] + rws) * g.c + group * p.cg + cbase + kc * 8;
                 }
                 else{
-                    int th = a_h[i] - r, tw = a_w[i] - s;
-                    // 相位保证 th、tw 能被步长整除
-                    int oh = th / g.stride_h, ow = tw / g.stride_w;
-                    ok = ok && th >= 0 && tw >= 0 && oh < g.p && ow < g.q;
-                    if (ok) src = a + (((size_t)a_n[i] * g.p + oh) * g.q + ow) * g.k + group * p.kg + cbase + kc * 8;
+                    int oh = ah - tap_i, ow = aw - tap_j;
+                    ok = oh >= 0 && oh < g.p && ow >= 0 && ow < g.q;
+                    if (ok) src = a + (size_t)(a_n[i] + rws) * g.k + group * p.kg + cbase + kc * 8;
                 }
                 CpAsync16(as + OffRK(row, kc * 8), src, ok);
             }
@@ -226,45 +230,88 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
             #pragma unroll
             for (int e = 0; e < 4; ++e) acc[i][j][e] = 0.f;
 
-    #pragma unroll
-    for (int s = 0; s < STAGES - 1; ++s){
-        if (s < ktiles) load_tile(s, s);
-        CpCommit();
-    }
-
-    for (int kt = 0; kt < ktiles; ++kt){
-        CpWait<STAGES - 2>();
-        __syncthreads();
-        int nt = kt + STAGES - 1;
-        if (nt < ktiles) load_tile(nt % STAGES, nt);
-        CpCommit();
-
-        const bf16* as = As + (kt % STAGES) * BM * BK;
-        const bf16* bs = Bs + (kt % STAGES) * BN * BK;
+    // 寄存器里的 fragment 双缓冲：做第 ks 个 k16 的 MMA 前先发出第 ks + 1 个 k16 的 ldmatrix；
+    // tile 的最后一个 k16 之前过 barrier，接着就读下一个 tile 的第一组 fragment，barrier 后马上有 MMA 可发射。
+    // 读最后一组 fragment 之前，本 tile 的共享内存已经全部读完，所以 barrier 后可以直接覆盖它（预取 STAGES 个 tile）
+    // 寄存器放不下两份 fragment 时（8 个 warp 的 128x128：每线程上限 128 个寄存器）退回单缓冲：每个 k16 先读再算
+    constexpr int KS = BK / 16;
+    static_assert(KS % 2 == 0, "BK 必须是 32 的倍数");
+    constexpr int MAX_REGS = 65536 / 2 / THREADS > 255 ? 255 : 65536 / 2 / THREADS;
+    constexpr bool FRAG_DB = MI * NT * 4 + 2 * (MI * 4 + NT * 2) <= MAX_REGS - 40;
+    unsigned af[FRAG_DB ? 2 : 1][MI][4], bfr[FRAG_DB ? 2 : 1][NT][2];
+    auto load_frag = [&](int buf, int stage, int kk){
+        const bf16* as = As + stage * BM * BK;
+        const bf16* bs = Bs + stage * BN * BK;
         #pragma unroll
-        for (int kk = 0; kk < BK; kk += 16){
-            unsigned af[MI][4], bfr[NT][2];
-            #pragma unroll
-            for (int i = 0; i < MI; ++i){
-                int mbase = wm * WM + i * 16;
-                if (A_RK) Ldm4<false>(af[i], as + OffRK(mbase + (lane & 15), kk + ((lane >> 4) << 3)));
-                else Ldm4<true>(af[i], as + OffKR<BM>(kk + (lane & 7) + ((lane >> 4) << 3), mbase + (((lane >> 3) & 1) << 3)));
-            }
-            #pragma unroll
-            for (int j = 0; j < NT; j += 2){
-                int nbase = wn * WN + j * 8;
-                unsigned r[4];
-                if (B_RK) Ldm4<false>(r, bs + OffRK(nbase + (lane & 7) + ((lane >> 4) << 3), kk + (((lane >> 3) & 1) << 3)));
-                else Ldm4<true>(r, bs + OffKR<BN>(kk + (lane & 7) + (((lane >> 3) & 1) << 3), nbase + ((lane >> 4) << 3)));
-                bfr[j][0] = r[0]; bfr[j][1] = r[1]; bfr[j + 1][0] = r[2]; bfr[j + 1][1] = r[3];
-            }
-            #pragma unroll
-            for (int i = 0; i < MI; ++i)
-                #pragma unroll
-                for (int j = 0; j < NT; ++j) Mma(acc[i][j], af[i], bfr[j][0], bfr[j][1]);
+        for (int i = 0; i < MI; ++i){
+            int mbase = wm * WM + i * 16;
+            if (A_RK) Ldm4<false>(af[buf][i], as + OffRK(mbase + (lane & 15), kk + ((lane >> 4) << 3)));
+            else Ldm4<true>(af[buf][i], as + OffKR<BM>(kk + (lane & 7) + ((lane >> 4) << 3), mbase + (((lane >> 3) & 1) << 3)));
         }
+        #pragma unroll
+        for (int j = 0; j < NT; j += 2){
+            int nbase = wn * WN + j * 8;
+            unsigned r[4];
+            if (B_RK) Ldm4<false>(r, bs + OffRK(nbase + (lane & 7) + ((lane >> 4) << 3), kk + (((lane >> 3) & 1) << 3)));
+            else Ldm4<true>(r, bs + OffKR<BN>(kk + (lane & 7) + (((lane >> 3) & 1) << 3), nbase + ((lane >> 4) << 3)));
+            bfr[buf][j][0] = r[0]; bfr[buf][j][1] = r[1]; bfr[buf][j + 1][0] = r[2]; bfr[buf][j + 1][1] = r[3];
+        }
+    };
+
+    if constexpr (!FRAG_DB){
+        #pragma unroll
+        for (int s = 0; s < STAGES - 1; ++s){
+            if (s < ktiles) load_tile(s, s);
+            CpCommit();
+        }
+        for (int kt = 0; kt < ktiles; ++kt){
+            CpWait<STAGES - 2>();
+            __syncthreads();
+            int nt = kt + STAGES - 1;
+            if (nt < ktiles) load_tile(nt % STAGES, nt);
+            CpCommit();
+            #pragma unroll
+            for (int ks = 0; ks < KS; ++ks){
+                load_frag(0, kt % STAGES, ks * 16);
+                #pragma unroll
+                for (int i = 0; i < MI; ++i)
+                    #pragma unroll
+                    for (int j = 0; j < NT; ++j) Mma(acc[i][j], af[0][i], bfr[0][j][0], bfr[0][j][1]);
+            }
+        }
+        CpWait<0>();
     }
-    CpWait<0>();
+    else{
+        #pragma unroll
+        for (int s = 0; s < STAGES; ++s){
+            if (s < ktiles) load_tile(s, s);
+            CpCommit();
+        }
+        CpWait<STAGES - 1>();
+        __syncthreads();
+        load_frag(0, 0, 0);
+
+        for (int kt = 0; kt < ktiles; ++kt){
+            const int stage = kt % STAGES;
+            #pragma unroll
+            for (int ks = 0; ks < KS; ++ks){
+                if (ks < KS - 1) load_frag((ks + 1) & 1, stage, (ks + 1) * 16);
+                else{
+                    // 等第 kt + 1 个 tile 到齐；本 tile 已读完，发出第 kt + STAGES 个 tile 覆盖它
+                    CpWait<STAGES - 2>();
+                    __syncthreads();
+                    if (kt + STAGES < ktiles) load_tile(stage, kt + STAGES);
+                    CpCommit();
+                    load_frag(0, (kt + 1) % STAGES, 0);
+                }
+                #pragma unroll
+                for (int i = 0; i < MI; ++i)
+                    #pragma unroll
+                    for (int j = 0; j < NT; ++j) Mma(acc[i][j], af[ks & 1][i], bfr[ks & 1][j][0], bfr[ks & 1][j][1]);
+            }
+        }
+        CpWait<0>();
+    }
 
     // ---- 写回 ----
     #pragma unroll
