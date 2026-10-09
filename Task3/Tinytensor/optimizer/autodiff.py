@@ -30,10 +30,13 @@ def topo_sort_dfs(node, visited, topo_order):
     topo_order.append(node)
     
 
-def compute_gradient_of_variables(output_tensor, out_grad):
+def compute_gradient_of_variables(output_tensor, out_grad, free_graph=False):
     """
     对输出节点相对于 node_list 中的每个节点求梯度。
     将计算结果存储在每个 Variable 的 grad 字段中。
+    free_graph=True 时（图像模型用）：一个中间节点的梯度一旦传给它的输入就释放，
+    它自己的前向结果也随之释放（逆拓扑序下，用到它的节点都已经处理完），
+    只给叶子节点保留 grad，显存峰值与 PyTorch 释放计算图的方式一致。
     """
     # map for 从节点到每个输出节点的梯度贡献列表
     node_to_output_grads_list = {}
@@ -54,7 +57,10 @@ def compute_gradient_of_variables(output_tensor, out_grad):
             if i == 0:
                 continue
             v_i = v_i + autodiff_joints[i]
-        node.grad = v_i
+        if node.op is None or not free_graph:
+            node.grad = v_i
+        if free_graph:
+            del node_to_output_grads_list[node]
 
         if node.op is None:
             continue
@@ -65,3 +71,9 @@ def compute_gradient_of_variables(output_tensor, out_grad):
                 continue
             node_to_output_grads_list.setdefault(node_input, [])
             node_to_output_grads_list[node_input].append(node_grad)
+        if free_graph:
+            del v_i, node_grads
+            if hasattr(node.op, "release"):
+                node.op.release()
+            if node is not output_tensor:
+                node.cached_data = None

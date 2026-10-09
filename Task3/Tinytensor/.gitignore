@@ -6,3 +6,5 @@ __pycache__/
 .pytest_cache/
 optimizer/data/
 pybind11/
+
+optimizer/results/imagenet/init/

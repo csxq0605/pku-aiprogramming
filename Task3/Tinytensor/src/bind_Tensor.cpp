@@ -33,6 +33,8 @@ void bind(py::module& m, const std::string& category){
         .def("gpu", &Tensor::gpu, py::return_value_policy::reference_internal)
         .def("random", &Tensor::random, py::arg("a"), py::arg("b"), py::arg("seed") = -1, py::return_value_policy::reference_internal)
         .def("zeros", &Tensor::zeros, py::return_value_policy::reference_internal)
+        // 视图与原张量共享显存，keep_alive 保证原张量在视图存在期间不被回收
+        .def("view", &Tensor::view, py::keep_alive<0, 1>())
         .def("ones", &Tensor::ones, py::return_value_policy::reference_internal)
         .def("negative", &Tensor::negative, py::return_value_policy::reference_internal)
         .def("mults", &Tensor::mults, py::return_value_policy::reference_internal)

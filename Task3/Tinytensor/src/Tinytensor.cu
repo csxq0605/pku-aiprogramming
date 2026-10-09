@@ -2,6 +2,7 @@
 //#include "Tinytensor_kernels.cuh"
 #include "TinyTensor.h"
 #include "TinyTensor_kernels.cuh"
+#include <cuda_bf16.h>
 #include <algorithm>
 #include <cmath>
 #include <type_traits>
@@ -86,7 +87,7 @@ TinyTensor<Type>::TinyTensor(const TinyTensor<Type>& other)
 
 template <typename Type>
 TinyTensor<Type>::TinyTensor(TinyTensor<Type>&& other) noexcept
-    : shape(std::move(other.shape)), device(other.device), p_data(other.p_data), size(other.size){
+    : shape(std::move(other.shape)), device(other.device), p_data(other.p_data), size(other.size), owner(other.owner){
     other.p_data = nullptr;
     other.size = 0;
 }
@@ -95,15 +96,16 @@ template <typename Type>
 TinyTensor<Type>& TinyTensor<Type>::operator=(TinyTensor<Type>&& other) noexcept{
     if (this != &other){
         if (device == "cpu"){
-            delete [] p_data;
+            if (owner) delete [] p_data;
         }
         else if (device == "gpu"){
-            GpuFree(p_data, size);
+            if (owner) GpuFree(p_data, size);
         }
         shape = std::move(other.shape);
         device = other.device;
         p_data = other.p_data;
         size = other.size;
+        owner = other.owner;
         other.p_data = nullptr;
         other.size = 0;
     }
@@ -113,11 +115,29 @@ TinyTensor<Type>& TinyTensor<Type>::operator=(TinyTensor<Type>&& other) noexcept
 template <typename Type>
 TinyTensor<Type>::~TinyTensor(){
     if (device == "cpu"){
-        delete [] p_data;
+        if (owner) delete [] p_data;
     }
     else if (device == "gpu"){
-        GpuFree(p_data, size);
+        if (owner) GpuFree(p_data, size);
     }
+}
+
+template <typename Type>
+TinyTensor<Type> TinyTensor<Type>::view(size_t offset, const std::vector<int>& new_shape) const{
+    size_t n = 1;
+    for (int d : new_shape){
+        n *= d;
+    }
+    if (offset + n > size){
+        throw std::invalid_argument("view: out of range");
+    }
+    TinyTensor<Type> v;
+    v.shape = new_shape;
+    v.device = device;
+    v.p_data = p_data + offset;
+    v.size = n;
+    v.owner = false;
+    return v;
 }
 
 template <typename Type>
@@ -135,14 +155,15 @@ TinyTensor<Type>& TinyTensor<Type>::operator=(const TinyTensor<Type>& other){
         return *this;
     }
     if (device == "cpu"){
-        delete [] p_data;
+        if (owner) delete [] p_data;
     }
     else if (device == "gpu"){
-        GpuFree(p_data, size);
+        if (owner) GpuFree(p_data, size);
     }
     shape = other.shape;
     device = other.device;
     size = Size();
+    owner = true;
     if (device == "cpu"){
         p_data = new Type[size];
         std::copy(other.p_data, other.p_data + size, p_data);
@@ -277,9 +298,10 @@ TinyTensor<Type>& TinyTensor<Type>::cpu() {
     if (device == "gpu"){
         Type* data = new Type[size];
         cudaMemcpy(data, p_data, size * sizeof(Type), cudaMemcpyDeviceToHost);
-        GpuFree(p_data, size);
+        if (owner) GpuFree(p_data, size);
         p_data = data;
         device = "cpu";
+        owner = true;
     }
     return *this;
 }
@@ -289,9 +311,10 @@ TinyTensor<Type>& TinyTensor<Type>::gpu() {
     if (device == "cpu"){
         Type* data = GpuAlloc<Type>(size);
         cudaMemcpy(data, p_data, size * sizeof(Type), cudaMemcpyHostToDevice);
-        delete [] p_data;
+        if (owner) delete [] p_data;
         p_data = data;
         device = "gpu";
+        owner = true;
     }
     return *this;
 }
@@ -402,15 +425,16 @@ TinyTensor<Type>& TinyTensor<Type>::resize(const std::vector<int>& new_shape){
     if (device == "cpu"){
         Type* new_data = new Type[new_size];
         std::copy(p_data, p_data + std::min(old_size, new_size), new_data);
-        delete [] p_data;
+        if (owner) delete [] p_data;
         p_data = new_data;
     }
     else if (device == "gpu"){
         Type* new_data = GpuAlloc<Type>(new_size);
         cudaMemcpyAsync(new_data, p_data, std::min(old_size, new_size) * sizeof(Type), cudaMemcpyDeviceToDevice);
-        GpuFree(p_data, old_size);
+        if (owner) GpuFree(p_data, old_size);
         p_data = new_data;
     }
+    owner = true;
     return *this;
 }
 
@@ -422,13 +446,14 @@ TinyTensor<Type>& TinyTensor<Type>::resize_discard(const std::vector<int>& new_s
     }
     if (new_size != size){
         if (device == "cpu"){
-            delete [] p_data;
+            if (owner) delete [] p_data;
             p_data = new Type[new_size];
         }
         else if (device == "gpu"){
-            GpuFree(p_data, size);
+            if (owner) GpuFree(p_data, size);
             p_data = GpuAlloc<Type>(new_size);
         }
+        owner = true;
     }
     shape = new_shape;
     size = new_size;
@@ -682,3 +707,24 @@ template class TinyTensor<float>;
 template std::ostream& operator<<(std::ostream& os, const TinyTensor<float>& tensor);
 template class TinyTensor<double>;
 template std::ostream& operator<<(std::ostream& os, const TinyTensor<double>& tensor);
+
+// ---- 图像模型（myNN）用到的额外元素类型：只实例化与元素运算无关的成员 ----
+// bf16 存激活值（混合精度），uint8 存常驻 GPU 的原始图像数据集
+#define TT_INSTANTIATE_STORAGE(T) \
+    template TinyTensor<T>::TinyTensor(const std::vector<int>&, const std::string&); \
+    template TinyTensor<T>::TinyTensor(const TinyTensor<T>&); \
+    template TinyTensor<T>::TinyTensor(TinyTensor<T>&&) noexcept; \
+    template TinyTensor<T>& TinyTensor<T>::operator=(TinyTensor<T>&&) noexcept; \
+    template TinyTensor<T>::~TinyTensor(); \
+    template size_t TinyTensor<T>::Size(); \
+    template std::vector<int> TinyTensor<T>::get_shape() const; \
+    template std::string TinyTensor<T>::get_device() const; \
+    template TinyTensor<T>& TinyTensor<T>::zeros(); \
+    template TinyTensor<T>& TinyTensor<T>::resize_discard(const std::vector<int>&); \
+    template TinyTensor<T>& TinyTensor<T>::copy_from(const TinyTensor<T>&, size_t); \
+    template TinyTensor<T> TinyTensor<T>::view(size_t, const std::vector<int>&) const;
+TT_INSTANTIATE_STORAGE(__nv_bfloat16)
+TT_INSTANTIATE_STORAGE(unsigned char)
+template TinyTensor<unsigned char>::TinyTensor(
+    const pybind11::array_t<unsigned char, pybind11::array::c_style | pybind11::array::forcecast>&, const std::string&);
+template pybind11::array_t<unsigned char> TinyTensor<unsigned char>::numpy() const;

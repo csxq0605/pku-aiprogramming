@@ -10,6 +10,13 @@ from autodiff import compute_gradient_of_variables
 from myTensor import Tensor_float as tf
 from myTensor import Tensor_int as ti
 import myLayer as ml
+try:
+    # 图像模型模块（bf16 / uint8 张量）；没编译时不影响 MNIST 部分
+    from myNN import Tensor_bf16 as tb, Tensor_uint8 as tu
+    import myNN
+except ImportError:
+    tb = tu = myNN = None
+GPU_TYPES = tuple(t for t in (tf, ti, tb, tu) if t is not None)
 
 class Tensor(Value):
     grad: "Tensor"
@@ -37,7 +44,7 @@ class Tensor(Value):
         elif isinstance(array, np.ndarray):
             device = device if device else cpu()
             cached_data = Tensor._array_from_numpy(array, device=device, dtype=dtype)
-        elif isinstance(array, tf) or isinstance(array, ti):
+        elif isinstance(array, GPU_TYPES):
             # 直接持有 GPU 张量，不拷回 CPU
             device = device if device else cpu()
             cached_data = array
@@ -111,7 +118,7 @@ class Tensor(Value):
     @property
     def shape(self):
         data = self.realize_cached_data()
-        if isinstance(data, (tf, ti)):
+        if isinstance(data, GPU_TYPES):
             return tuple(data.get_shape())
         return data.shape
 
@@ -122,6 +129,10 @@ class Tensor(Value):
             return np.dtype(np.float32)
         if isinstance(data, ti):
             return np.dtype(np.int32)
+        if tb is not None and isinstance(data, tb):
+            return "bfloat16"
+        if tu is not None and isinstance(data, tu):
+            return np.dtype(np.uint8)
         return data.dtype
 
     @property
@@ -216,14 +227,14 @@ def _gpu(array):
 
 def _np(array):
     """转成 numpy 数组"""
-    if isinstance(array, (tf, ti)):
+    if isinstance(array, GPU_TYPES):
         return array.numpy()
     return array
 
 
 def _grad(data):
     """把算子算出的梯度包装成不需要再求导的 Tensor，GPU 上的梯度留在 GPU"""
-    if not isinstance(data, (tf, ti)):
+    if not isinstance(data, GPU_TYPES):
         data = np.asarray(data, dtype=np.float32)
     return Tensor(data, requires_grad=False)
 
@@ -234,6 +245,10 @@ class EWiseAdd(TensorOp):
     def compute(self, a, b):
         if isinstance(a, tf) and isinstance(b, tf) and a.get_shape() == b.get_shape():
             return a + b
+        if tb is not None and isinstance(a, tb) and isinstance(b, tb):
+            out = tb([1], "gpu")
+            myNN.add(a, b, out)
+            return out
         return _np(a) + _np(b)
 
     def gradient(self, out_grad: Tensor, node: Tensor):

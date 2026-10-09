@@ -15,6 +15,11 @@ class TinyTensor{
         std::string device;
         Type* p_data;
         size_t size;
+        // false 表示这是别的张量里的一段（view），析构时不释放显存
+        bool owner = true;
+
+    private:
+        TinyTensor() : device("gpu"), p_data(nullptr), size(0){}
     
     public:
         TinyTensor(const std::vector<int>& shape, const std::string& device);
@@ -33,6 +38,9 @@ class TinyTensor{
         ~TinyTensor();
 
         size_t Size();
+
+        // 不拷贝的视图：从第 offset 个元素开始、形状为 shape；原张量必须比视图活得久
+        TinyTensor<Type> view(size_t offset, const std::vector<int>& shape) const;
 
         TinyTensor<Type>& operator=(const TinyTensor<Type>& other);
 
