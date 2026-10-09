@@ -102,19 +102,24 @@ def run(trainer, args, framework):
                   params=trainer.num_params)
 
     if args.bench:
-        # 吞吐测试：先跑 warmup 个 step（包括第一个 eager step、CUDA Graph 录制或 torch.compile 编译），再计时
+        # 吞吐测试：先跑 warmup 个 step（包括第一个 eager step、CUDA Graph 录制或 torch.compile 编译），再计时。
+        # 计时段按 --chunk 切成若干张 CUDA Graph，每种长度的图都要在预热里先录好，否则录制时间会算进计时
         trainer.begin_epoch(epoch_order(args.seed, 0, n_train))
+        lens = sorted({min(args.chunk, args.bench), args.bench % args.chunk} - {0})
+        warm_steps = args.bench_warmup + sum(lens)
+        assert warm_steps + args.bench <= steps_per_epoch, "bench 步数超过一个 epoch（加大 --train-limit）"
         t0 = time.perf_counter()
         trainer.train_steps(args.bench_warmup)
+        for k in lens:
+            trainer.train_steps(k)
         trainer.sync()
         warm = time.perf_counter() - t0
-        assert args.bench_warmup + args.bench <= steps_per_epoch, "bench 步数超过一个 epoch"
         t0 = time.perf_counter()
         trainer.train_steps(args.bench)
         trainer.sync()
         elapsed = time.perf_counter() - t0
         loss_sum, correct = trainer.train_stats()
-        n = (args.bench_warmup + args.bench) * args.batch
+        n = (warm_steps + args.bench) * args.batch
         record.update(bench_steps=args.bench, warmup_seconds=warm, seconds=elapsed,
                       ms_per_step=elapsed / args.bench * 1e3, images_per_sec=args.bench * args.batch / elapsed,
                       train_loss=loss_sum / n, peak_mem_mb=trainer.peak_memory_mb())
