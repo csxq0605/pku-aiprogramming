@@ -352,13 +352,17 @@ void LaunchStages(const bf16* a, const bf16* b, void* out, const TcArgs& p){
     else LaunchTc<MODE, BM, BN, 3, WGM, WGN>(a, b, out, p);
 }
 
-// 大 warp tile 配置（每个 warp 64x64 或 32x64，4 个 warp）：共享内存充足的卡默认用；TT_TC_CFG=big / small 可强制指定
-bool BigTiles(){
-    static bool big = [](){
+// 大 warp tile 配置（每个 warp 64x64 或 32x64，4 个 warp）：0 = 不用，1 = 只用在 N 只有 64 的层（256x64）和
+// WGRAD 输出通道只有 64 的层（64x128），2 = 全部用。A100 上 tune2 实测：256x64 / 64x128 在 VGG 64@64 上快 10~25%，
+// 128x128 的 2x2 布局在 128 / 512 通道和 1x1 层上普遍更慢，所以共享内存充足的卡默认 1，其余默认 0。
+// TT_TC_CFG=small / auto / big 可强制指定
+int BigTiles(){
+    static int big = [](){
         const char* e = getenv("TT_TC_CFG");
-        if (e && std::string(e) == "big") return true;
-        if (e && std::string(e) == "small") return false;
-        return Stages() == 4;
+        if (e && std::string(e) == "small") return 0;
+        if (e && std::string(e) == "auto") return 1;
+        if (e && std::string(e) == "big") return 2;
+        return Stages() == 4 ? 1 : 0;
     }();
     return big;
 }
@@ -376,11 +380,11 @@ void Dispatch(const bf16* a, const bf16* b, void* out, TcArgs p){
         p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;
         p.splits = (p.gk + p.k_per_split - 1) / p.k_per_split;
     }
-    if (BigTiles()){
-        if (MODE == WGRAD && bm == 64) LaunchStages<MODE, 64, 128, 2, 2>(a, b, out, p);
-        else if (bn == 64 && MODE != WGRAD) LaunchStages<MODE, 256, 64, 4, 1>(a, b, out, p);
-        else LaunchStages<MODE, 128, 128, 2, 2>(a, b, out, p);
-        return;
+    const int big = BigTiles();
+    if (big){
+        if (MODE == WGRAD && bm == 64){ LaunchStages<MODE, 64, 128, 2, 2>(a, b, out, p); return; }
+        if (bn == 64 && MODE != WGRAD){ LaunchStages<MODE, 256, 64, 4, 1>(a, b, out, p); return; }
+        if (big == 2){ LaunchStages<MODE, 128, 128, 2, 2>(a, b, out, p); return; }
     }
     if (MODE == WGRAD && bm == 64){
         if (bn == 64) LaunchStages<MODE, 64, 64>(a, b, out, p);
