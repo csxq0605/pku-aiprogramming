@@ -314,61 +314,65 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
     }
 
     // ---- 写回 ----
-    if (MODE != WGRAD){
-        // 先把 bf16 结果摆进共享内存（行宽 BN + 8 错开 bank），再每个线程按 16 字节一块写出：
-        // 直接写的话每行只有 4 个线程 x 4 字节 = 16 字节连续，32 字节的 sector 只用到一半
+    // FWD 的 256x64 tile：先把 bf16 结果摆进共享内存（行宽 BN + 8 错开 bank），再每个线程按 16 字节一块写出。
+    // 直接写的话每行只有 4 个线程 x 4 字节 = 16 字节连续，32 字节的 sector 只用到一半（ncu 提示的写回低效）。
+    // A100 上 A/B：VGG 层 fwd 快 7%；其它配置 / DGRAD 反而变慢（多两次 __syncthreads，DGRAD 还会多出寄存器溢出），保持直接写
+    constexpr bool STAGED = MODE == FWD && BM == 256;
+    if constexpr (STAGED){
         constexpr int CS = BN + 8;
         static_assert(BM * CS <= STAGES * (BM + BN) * BK, "写回缓冲放不进流水线的共享内存");
         bf16* cs = (bf16*)smem_raw;
         __syncthreads();
-        const int ew = threadIdx.x >> 5, el = threadIdx.x & 31;
-        bf16* cw = cs + ((ew % WGM) * WM + (el >> 2)) * CS + (ew / WGM) * WN + (el & 3) * 2;
+        bf16* cw = cs + (wm * WM + (lane >> 2)) * CS + wn * WN + (lane & 3) * 2;
         #pragma unroll
         for (int i = 0; i < MI; ++i)
             #pragma unroll
-            for (int half = 0; half < 2; ++half){
+            for (int half = 0; half < 2; ++half)
                 #pragma unroll
                 for (int j = 0; j < NT; ++j)
                     *(__nv_bfloat162*)(cw + (i * 16 + half * 8) * CS + j * 8) =
                         __floats2bfloat162_rn(acc[i][j][half * 2], acc[i][j][half * 2 + 1]);
-            }
         __syncthreads();
-        // 这里用到的块坐标都从 blockIdx 重新算，不让它们跨主循环占寄存器（256x64 的配置寄存器正好用满）
-        const int bn0 = blockIdx.y * BN, bgroup = blockIdx.z / p.splits;
-        const int bm0 = MODE == DGRAD ? (blockIdx.x % p.bpp) * BM : blockIdx.x * BM;
-        const int bphase = MODE == DGRAD ? blockIdx.x / p.bpp : 0;
-        const size_t ld = MODE == FWD ? g.k : g.c;
-        const int col0 = (MODE == FWD ? bgroup * p.kg : bgroup * p.cg) + bn0;
+        const int col0 = group * p.kg + n0;
         #pragma unroll 1
-        for (int c = threadIdx.x; c < BM * BN / 8; c += THREADS){
-            const int r = c / (BN / 8), cc = (c % (BN / 8)) * 8, m = bm0 + r;
-            if (m >= p.gm || bn0 + cc >= p.gn) continue;
-            size_t row = m;
-            if (MODE == DGRAD){
-                const int Hq = g.h / g.stride_h, Wq = g.w / g.stride_w;
-                int iw = m % Wq; int t = m / Wq; int ih = t % Hq; int n = t / Hq;
-                row = ((size_t)n * g.h + ih * g.stride_h + bphase / g.stride_w) * g.w + iw * g.stride_w + bphase % g.stride_w;
-            }
-            bf16* o = (bf16*)out + row * ld + col0 + cc;
+        for (int c = tid; c < BM * BN / 8; c += THREADS){
+            const int r = c / (BN / 8), cc = (c % (BN / 8)) * 8, m = m0 + r;
+            if (m >= p.gm || n0 + cc >= p.gn) continue;
+            bf16* o = (bf16*)out + (size_t)m * g.k + col0 + cc;
             const bf16* s = cs + r * CS + cc;
-            if (bn0 + cc + 8 <= p.gn && ((uintptr_t)o & 15) == 0) *(uint4*)o = *(const uint4*)s;
-            else for (int e = 0; e < 8 && bn0 + cc + e < p.gn; ++e) o[e] = s[e];
+            if (n0 + cc + 8 <= p.gn && ((uintptr_t)o & 15) == 0) *(uint4*)o = *(const uint4*)s;
+            else for (int e = 0; e < 8 && n0 + cc + e < p.gn; ++e) o[e] = s[e];
         }
     }
-    // WGRAD：split-K 的部分和原子加到 fp32 的 dw
-    else
-    #pragma unroll
-    for (int i = 0; i < MI; ++i){
+    else{
         #pragma unroll
-        for (int half = 0; half < 2; ++half){
-            int m = m0 + wm * WM + i * 16 + (lane >> 2) + half * 8;
-            if (m >= p.gm) continue;
+        for (int i = 0; i < MI; ++i){
             #pragma unroll
-            for (int j = 0; j < NT; ++j){
-                int n = n0 + wn * WN + j * 8 + (lane & 3) * 2;
-                float* dw = (float*)out + (size_t)(group * p.kg + m) * p.gn + n;
-                if (n < p.gn) atomicAdd(dw, acc[i][j][half * 2]);
-                if (n + 1 < p.gn) atomicAdd(dw + 1, acc[i][j][half * 2 + 1]);
+            for (int half = 0; half < 2; ++half){
+                int m = m0 + wm * WM + i * 16 + (lane >> 2) + half * 8;
+                if (m >= p.gm) continue;
+                size_t row = m;
+                if (MODE == DGRAD){
+                    int iw = m % Wp; int t = m / Wp; int ih = t % Hp; int n = t / Hp;
+                    row = ((size_t)n * g.h + ih * g.stride_h + ph_h) * g.w + iw * g.stride_w + ph_w;
+                }
+                #pragma unroll
+                for (int j = 0; j < NT; ++j){
+                    int n = n0 + wn * WN + j * 8 + (lane & 3) * 2;
+                    float v0 = acc[i][j][half * 2], v1 = acc[i][j][half * 2 + 1];
+                    if (MODE == WGRAD){
+                        float* dw = (float*)out + (size_t)(group * p.kg + m) * p.gn + n;
+                        if (n < p.gn) atomicAdd(dw, v0);
+                        if (n + 1 < p.gn) atomicAdd(dw + 1, v1);
+                    }
+                    else{
+                        size_t ld = MODE == FWD ? g.k : g.c;
+                        int col = (MODE == FWD ? group * p.kg : group * p.cg) + n;
+                        bf16* o = (bf16*)out + row * ld + col;
+                        if (n + 1 < p.gn) *(__nv_bfloat162*)o = __floats2bfloat162_rn(v0, v1);
+                        else if (n < p.gn) *o = __float2bfloat16(v0);
+                    }
+                }
             }
         }
     }
