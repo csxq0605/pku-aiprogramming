@@ -22,7 +22,58 @@ void FcBackward(
     TinyTensor<T>& grad_input,
     const TinyTensor<T>& grad_output,
     TinyTensor<T>& grad_weight,
-    TinyTensor<T>& grad_bais
+    TinyTensor<T>& grad_bais,
+    bool need_grad_input = true
+);
+
+void FcReluForward(
+    const TinyTensor<float>& input,
+    TinyTensor<float>& output,
+    const TinyTensor<float>& weight,
+    const TinyTensor<float>& bias
+);
+
+void FcReluBackward(
+    const TinyTensor<float>& input,
+    const TinyTensor<float>& output,
+    const TinyTensor<float>& weight,
+    TinyTensor<float>& grad_input,
+    const TinyTensor<float>& grad_output,
+    TinyTensor<float>& grad_weight,
+    TinyTensor<float>& grad_bias,
+    bool need_grad_input
+);
+
+void ConvReluMaxPoolForward(
+    const TinyTensor<float>& input,
+    const TinyTensor<float>& weight,
+    TinyTensor<float>& pooled,
+    TinyTensor<int>& argmax,
+    const int pad_h,
+    const int pad_w,
+    const int stride_h,
+    const int stride_w
+);
+
+void ConvReluMaxPoolBackward(
+    const TinyTensor<float>& input,
+    const TinyTensor<float>& weight,
+    const TinyTensor<float>& grad_pooled,
+    const TinyTensor<int>& argmax,
+    TinyTensor<float>& grad_input,
+    TinyTensor<float>& grad_weight,
+    const int pad_h,
+    const int pad_w,
+    const int stride_h,
+    const int stride_w,
+    bool need_grad_input
+);
+
+void SoftmaxCrossEntropy(
+    const TinyTensor<float>& input,
+    const TinyTensor<int>& labels,
+    TinyTensor<float>& loss,
+    TinyTensor<float>& grad
 );
 
 template <typename T>
@@ -70,7 +121,8 @@ void ConvBackward(
     const int pad_h,
     const int pad_w,
     const int stride_h,
-    const int stride_w
+    const int stride_w,
+    bool need_grad_input = true
 );
 
 template <typename T>
