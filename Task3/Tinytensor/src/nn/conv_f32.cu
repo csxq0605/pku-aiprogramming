@@ -227,7 +227,7 @@ void Dispatch(const float* a, const float* b, float* out, const ConvGeom& g){
     p.splits = 1; p.k_per_split = p.gk;
     if (MODE == WGRAD){
         int tiles = ((p.gm + BM - 1) / BM) * ((p.gn + bn - 1) / bn) * g.groups;
-        int want = std::max(1, 96 / tiles);
+        int want = std::max(1, 4 * DeviceSmCount() / tiles);
         int max_splits = std::max(1, p.gk / (BK * 32));
         p.splits = std::min(want, max_splits);
         p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;

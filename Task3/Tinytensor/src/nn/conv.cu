@@ -186,7 +186,7 @@ ConvArgs MakeArgs(const ConvGeom& g, int mode){
     if (mode == WGRAD){
         // 输出很小、Kdim 很长：切成若干段并行，目标约 4 个 block / SM
         int tiles = ((p.gm + SBM - 1) / SBM) * ((p.gn + SBN - 1) / SBN) * g.groups;
-        int want = std::max(1, 96 / tiles);
+        int want = std::max(1, 4 * DeviceSmCount() / tiles);
         int max_splits = std::max(1, p.gk / (SBK * 16));
         p.splits = std::min(want, max_splits);
         p.k_per_split = ((p.gk + p.splits - 1) / p.splits + SBK - 1) / SBK * SBK;

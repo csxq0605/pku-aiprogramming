@@ -1,5 +1,5 @@
 // bf16 卷积的 tensor core 版本：隐式 GEMM + mma.sync.m16n8k16（fp32 累加）
-// - 全局 -> 共享内存用 cp.async（16 字节 = 8 个 bf16，越界的块由硬件填 0），3 级流水
+// - 全局 -> 共享内存用 cp.async（16 字节 = 8 个 bf16，越界的块由硬件填 0），3 或 4 级流水（按每个 SM 的共享内存选，见 Stages）
 // - 共享内存 -> 寄存器用 ldmatrix；按 K 连续存放的 tile 用普通 ldmatrix，按 M/N 连续存放的用 ldmatrix.trans
 // - 共享内存按 16 字节块做 XOR swizzle，ldmatrix 与 cp.async 都没有 bank conflict
 // 三种 GEMM 的定义与 conv.cu 相同：
@@ -9,13 +9,14 @@
 //          只循环对这个相位有效的抽头（步长 2 的 3x3 卷积省掉 3/4 的无效计算）
 //   WGRAD: A = dy^T [M=K/g][K=像素]（M 连续）, B = im2col(x) [K=像素][N=R*S*C/g]（N 连续），split-K + atomicAdd
 // 只处理通道数对齐的情况（见 ConvTensorCoreSupported），其余回退到 conv.cu 的 SIMT 版本
+#include <cstdlib>
 #include "nn_common.cuh"
 #include "nn_ops.h"
 
 namespace {
 
 enum Mode { FWD = 0, DGRAD = 1, WGRAD = 2 };
-constexpr int BK = 32, STAGES = 3, THREADS = 256;
+constexpr int BK = 32, THREADS = 256;
 constexpr int BM_DG = 128;   // DGRAD 的 BM（bpp 按它算）
 
 struct TcArgs{
@@ -62,7 +63,7 @@ __device__ __forceinline__ int OffKR(int k, int col){ return k * ROWS + ((((col 
 template <int MODE> struct Layout{ static constexpr bool A_RK = MODE != WGRAD; static constexpr bool B_RK = MODE == FWD; };
 
 // BM = 128 或 64（WGRAD 输出通道只有 64 时用 64，避免一半 tile 空转）；8 个 warp 排成 2(M) x 4(N)
-template <int MODE, int BM, int BN>
+template <int MODE, int BM, int BN, int STAGES>
 __global__ void __launch_bounds__(THREADS, 2) ConvTc(const bf16* __restrict__ a, const bf16* __restrict__ b, void* __restrict__ out,
                                                   const TcArgs p){
     extern __shared__ __align__(128) unsigned char smem_raw[];
@@ -295,18 +296,18 @@ __global__ void __launch_bounds__(THREADS, 2) ConvTc(const bf16* __restrict__ a,
     }
 }
 
-template <int MODE, int BM, int BN>
+template <int MODE, int BM, int BN, int STAGES>
 void LaunchTc(const bf16* a, const bf16* b, void* out, const TcArgs& p){
     const int smem = STAGES * (BM + BN) * BK * (int)sizeof(bf16);
     static bool configured = false;
     if (!configured){
-        cudaFuncSetAttribute(ConvTc<MODE, BM, BN>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+        cudaFuncSetAttribute(ConvTc<MODE, BM, BN, STAGES>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
         configured = true;
     }
     int gx = (p.gm + BM - 1) / BM;
     if (MODE == DGRAD) gx *= p.g.stride_h * p.g.stride_w;
     dim3 grid(gx, (p.gn + BN - 1) / BN, p.g.groups * p.splits);
-    ConvTc<MODE, BM, BN><<<grid, THREADS, smem>>>(a, b, out, p);
+    ConvTc<MODE, BM, BN, STAGES><<<grid, THREADS, smem>>>(a, b, out, p);
 }
 
 TcArgs MakeTcArgs(const ConvGeom& g, int mode){
@@ -323,25 +324,49 @@ TcArgs MakeTcArgs(const ConvGeom& g, int mode){
     return p;
 }
 
+int DeviceAttr(cudaDeviceAttr attr){
+    int dev = 0, v = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&v, attr, dev);
+    return v;
+}
+
+// 流水级数：128x128 的 tile 每级 16KB。每个 SM 的共享内存放得下两个 4 级 block（A100 / H100：164KB 以上）就用 4 级，
+// 否则（如 RTX 40 系列每个 SM 100KB）用 3 级，保证每个 SM 能同时跑 2 个 block。环境变量 TT_TC_STAGES 可强制指定（对照实验用）
+int Stages(){
+    static int st = [](){
+        const char* e = getenv("TT_TC_STAGES");
+        if (e && (atoi(e) == 3 || atoi(e) == 4)) return atoi(e);
+        return DeviceAttr(cudaDevAttrMaxSharedMemoryPerMultiprocessor) >= 2 * 4 * 256 * BK * 2 + 4096 ? 4 : 3;
+    }();
+    return st;
+}
+
+template <int MODE, int BM, int BN>
+void LaunchStages(const bf16* a, const bf16* b, void* out, const TcArgs& p){
+    if (Stages() == 4) LaunchTc<MODE, BM, BN, 4>(a, b, out, p);
+    else LaunchTc<MODE, BM, BN, 3>(a, b, out, p);
+}
+
 template <int MODE>
 void Dispatch(const bf16* a, const bf16* b, void* out, TcArgs p){
     const int bn = p.gn <= 64 ? 64 : 128;
     const int bm = MODE == WGRAD && p.gm <= 64 ? 64 : 128;
     if (MODE == WGRAD){
-        // 输出（K x RSC）通常很小而像素维很长：split-K 凑够约 2 波 block（24 个 SM，每个 SM 1~2 个 block）
+        // 输出（K x RSC）通常很小而像素维很长：split-K 凑够约 1.5 波 block（每个 SM 2 个 block）
         int tiles = ((p.gm + bm - 1) / bm) * ((p.gn + bn - 1) / bn) * p.g.groups;
-        int want = std::max(1, 72 / tiles);
+        int want = std::max(1, 3 * DeviceSmCount() / tiles);
         int max_splits = std::max(1, p.gk / (BK * 8));
         p.splits = std::min(want, max_splits);
         p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;
         p.splits = (p.gk + p.k_per_split - 1) / p.k_per_split;
     }
     if (MODE == WGRAD && bm == 64){
-        if (bn == 64) LaunchTc<MODE, 64, 64>(a, b, out, p);
-        else LaunchTc<MODE, 64, 128>(a, b, out, p);
+        if (bn == 64) LaunchStages<MODE, 64, 64>(a, b, out, p);
+        else LaunchStages<MODE, 64, 128>(a, b, out, p);
     }
-    else if (bn == 64) LaunchTc<MODE, 128, 64>(a, b, out, p);
-    else LaunchTc<MODE, 128, 128>(a, b, out, p);
+    else if (bn == 64) LaunchStages<MODE, 128, 64>(a, b, out, p);
+    else LaunchStages<MODE, 128, 128>(a, b, out, p);
 }
 
 }  // namespace

@@ -35,6 +35,12 @@ inline void NNCheckGpu(const TinyTensor<T>& t, const std::string& what){
 }
 
 // 网格大小：元素数较多时用固定数量的 block 做 grid-stride 循环
+// 当前设备的 SM 数（split-K、常驻 block 数等启发式用）
+inline int DeviceSmCount(){
+    static int n = [](){ int dev = 0, v = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&v, cudaDevAttrMultiProcessorCount, dev); return v; }();
+    return n;
+}
+
 inline int GridFor(size_t n, int block = BLOCK_SIZE){
     size_t blocks = (n + block - 1) / block;
     return (int)std::min<size_t>(std::max<size_t>(blocks, 1), 65535);
