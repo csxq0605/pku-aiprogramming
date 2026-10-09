@@ -1,0 +1,98 @@
+{
+  "framework": "PyTorch 2.14.1+cu126 (cuda)",
+  "arch": "mlp",
+  "args": {
+    "epochs": 10,
+    "batch": 100,
+    "lr": 0.1,
+    "optimizer": "sgd",
+    "seed": 0,
+    "data": "/mnt/e/PKU/code_in_ai/Tinytensor/optimizer/data/MNIST/raw",
+    "save": "/mnt/e/PKU/code_in_ai/pku-aiprogramming/Task3/results/json/pytorch_mlp_graph.json",
+    "graph": true,
+    "chunk": 100,
+    "compile": null
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.14690261103312174,
+      "train_err": 0.04186666666666667,
+      "test_loss": 0.15057845878601075,
+      "test_err": 0.0438,
+      "epoch_time": 0.9561764019999828
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.09523099250793457,
+      "train_err": 0.026816666666666666,
+      "test_loss": 0.11208140106201171,
+      "test_err": 0.0328,
+      "epoch_time": 0.07405705800002238
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.07191557547251383,
+      "train_err": 0.020316666666666667,
+      "test_loss": 0.09588385162353516,
+      "test_err": 0.0284,
+      "epoch_time": 0.058353440000018963
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.0571616330464681,
+      "train_err": 0.01645,
+      "test_loss": 0.08796169757843017,
+      "test_err": 0.0259,
+      "epoch_time": 0.0669491120000032
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.048567118390401204,
+      "train_err": 0.01325,
+      "test_loss": 0.08386285552978516,
+      "test_err": 0.0243,
+      "epoch_time": 0.07077646599998388
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.041027986653645834,
+      "train_err": 0.011016666666666666,
+      "test_loss": 0.08121123485565186,
+      "test_err": 0.0252,
+      "epoch_time": 0.061180194000002075
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.03546810245513916,
+      "train_err": 0.00955,
+      "test_loss": 0.07973920860290527,
+      "test_err": 0.0234,
+      "epoch_time": 0.06000984900001072
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.03094450438817342,
+      "train_err": 0.00795,
+      "test_loss": 0.07917579956054688,
+      "test_err": 0.0239,
+      "epoch_time": 0.06338727499999663
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.025744528516133625,
+      "train_err": 0.006166666666666667,
+      "test_loss": 0.07499756889343262,
+      "test_err": 0.0224,
+      "epoch_time": 0.0681679969999891
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.02384606394767761,
+      "train_err": 0.0061,
+      "test_loss": 0.07759779396057129,
+      "test_err": 0.0239,
+      "epoch_time": 0.06953671699997699
+    }
+  ]
+}
