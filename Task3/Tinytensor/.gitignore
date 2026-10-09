@@ -1,0 +1,8 @@
+build/
+*.egg-info/
+*.so
+*.pyd
+__pycache__/
+.pytest_cache/
+optimizer/data/
+pybind11/
