@@ -16,8 +16,7 @@
 namespace {
 
 enum Mode { FWD = 0, DGRAD = 1, WGRAD = 2 };
-constexpr int BK = 32, THREADS = 256;
-constexpr int BM_DG = 128;   // DGRAD 的 BM（bpp 按它算）
+constexpr int BK = 32;
 
 struct TcArgs{
     ConvGeom g;
@@ -62,22 +61,26 @@ __device__ __forceinline__ int OffKR(int k, int col){ return k * ROWS + ((((col 
 // A 是否按 K 连续（RK 布局）：FWD / DGRAD 是，WGRAD 不是（KR 布局）
 template <int MODE> struct Layout{ static constexpr bool A_RK = MODE != WGRAD; static constexpr bool B_RK = MODE == FWD; };
 
-// BM = 128 或 64（WGRAD 输出通道只有 64 时用 64，避免一半 tile 空转）；8 个 warp 排成 2(M) x 4(N)
-template <int MODE, int BM, int BN, int STAGES>
-__global__ void __launch_bounds__(THREADS, 2) ConvTc(const bf16* __restrict__ a, const bf16* __restrict__ b, void* __restrict__ out,
+// block tile BM x BN，WGM x WGN 个 warp，每个 warp 负责 (BM/WGM) x (BN/WGN)。
+// 配置见 Dispatch：RTX 40 系列用 8 个 warp 的 128x128 / 128x64；A100 这类共享内存大的卡用 4 个 warp、每个 warp 64x64 的大 tile
+// （和 cuDNN 在 A100 上选的 256x64 / 128x128 一致：每个 k16 步 MMA 与 ldmatrix 之比更高）
+template <int MODE, int BM, int BN, int STAGES, int WGM, int WGN>
+__global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restrict__ a, const bf16* __restrict__ b, void* __restrict__ out,
                                                   const TcArgs p){
     extern __shared__ __align__(128) unsigned char smem_raw[];
     bf16* As = (bf16*)smem_raw;                       // [STAGES][BM * BK]
     bf16* Bs = As + STAGES * BM * BK;                 // [STAGES][BN * BK]
     constexpr bool A_RK = Layout<MODE>::A_RK, B_RK = Layout<MODE>::B_RK;
-    constexpr int WM = BM / 2, MI = WM / 16;          // 每个 warp WM x WN，MI 个 m16 tile
-    constexpr int WN = BN / 4, NT = WN / 8;           // NT 个 n8 tile
-    constexpr int A_CHUNKS = BM * BK / 8 / THREADS;   // = 2 或 1
-    constexpr int B_CHUNKS = BN * BK / 8 / THREADS;   // = 2 或 1
+    constexpr int THREADS = WGM * WGN * 32;
+    constexpr int WM = BM / WGM, MI = WM / 16;        // 每个 warp WM x WN，MI 个 m16 tile
+    constexpr int WN = BN / WGN, NT = WN / 8;         // NT 个 n8 tile
+    constexpr int A_CHUNKS = BM * BK / 8 / THREADS;   // 每个线程每级搬运的 16 字节块数
+    constexpr int B_CHUNKS = BN * BK / 8 / THREADS;
+    static_assert(A_CHUNKS * THREADS * 8 == BM * BK && B_CHUNKS * THREADS * 8 == BN * BK && NT % 2 == 0, "tile 配置");
 
     const ConvGeom& g = p.g;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
-    const int wm = warp & 1, wn = warp >> 1;
+    const int wm = warp % WGM, wn = warp / WGM;
     int m0 = blockIdx.x * BM;
     const int n0 = blockIdx.y * BN;
     const int group = blockIdx.z / p.splits, split = blockIdx.z % p.splits;
@@ -97,7 +100,7 @@ __global__ void __launch_bounds__(THREADS, 2) ConvTc(const bf16* __restrict__ a,
         ktiles = nr * ns * (p.kg / BK);
     }
 
-    // FWD / DGRAD 的 A 每个线程固定负责 2 行：预先把行号拆成 (n, h, w)
+    // FWD / DGRAD 的 A 每个线程固定负责 A_CHUNKS 行：预先把行号拆成 (n, h, w)
     int a_n[A_CHUNKS], a_h[A_CHUNKS], a_w[A_CHUNKS];
     bool a_ok[A_CHUNKS];
     if (A_RK){
@@ -296,18 +299,19 @@ __global__ void __launch_bounds__(THREADS, 2) ConvTc(const bf16* __restrict__ a,
     }
 }
 
-template <int MODE, int BM, int BN, int STAGES>
-void LaunchTc(const bf16* a, const bf16* b, void* out, const TcArgs& p){
+template <int MODE, int BM, int BN, int STAGES, int WGM, int WGN>
+void LaunchTc(const bf16* a, const bf16* b, void* out, TcArgs p){
     const int smem = STAGES * (BM + BN) * BK * (int)sizeof(bf16);
     static bool configured = false;
     if (!configured){
-        cudaFuncSetAttribute(ConvTc<MODE, BM, BN, STAGES>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+        cudaFuncSetAttribute(ConvTc<MODE, BM, BN, STAGES, WGM, WGN>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
         configured = true;
     }
-    int gx = (p.gm + BM - 1) / BM;
+    p.bpp = (p.gm + BM - 1) / BM;
+    int gx = p.bpp;
     if (MODE == DGRAD) gx *= p.g.stride_h * p.g.stride_w;
     dim3 grid(gx, (p.gn + BN - 1) / BN, p.g.groups * p.splits);
-    ConvTc<MODE, BM, BN, STAGES><<<grid, THREADS, smem>>>(a, b, out, p);
+    ConvTc<MODE, BM, BN, STAGES, WGM, WGN><<<grid, WGM * WGN * 32, smem>>>(a, b, out, p);
 }
 
 TcArgs MakeTcArgs(const ConvGeom& g, int mode){
@@ -320,7 +324,7 @@ TcArgs MakeTcArgs(const ConvGeom& g, int mode){
     else { p.gm = p.kg; p.gn = g.r * g.s * p.cg; p.gk = g.n * g.p * g.q; }
     p.splits = 1;
     p.k_per_split = p.gk;
-    p.bpp = (p.gm + BM_DG - 1) / BM_DG;
+    p.bpp = 1;
     return p;
 }
 
@@ -342,10 +346,21 @@ int Stages(){
     return st;
 }
 
-template <int MODE, int BM, int BN>
+template <int MODE, int BM, int BN, int WGM = 2, int WGN = 4>
 void LaunchStages(const bf16* a, const bf16* b, void* out, const TcArgs& p){
-    if (Stages() == 4) LaunchTc<MODE, BM, BN, 4>(a, b, out, p);
-    else LaunchTc<MODE, BM, BN, 3>(a, b, out, p);
+    if (Stages() == 4) LaunchTc<MODE, BM, BN, 4, WGM, WGN>(a, b, out, p);
+    else LaunchTc<MODE, BM, BN, 3, WGM, WGN>(a, b, out, p);
+}
+
+// 大 warp tile 配置（每个 warp 64x64 或 32x64，4 个 warp）：共享内存充足的卡默认用；TT_TC_CFG=big / small 可强制指定
+bool BigTiles(){
+    static bool big = [](){
+        const char* e = getenv("TT_TC_CFG");
+        if (e && std::string(e) == "big") return true;
+        if (e && std::string(e) == "small") return false;
+        return Stages() == 4;
+    }();
+    return big;
 }
 
 template <int MODE>
@@ -360,6 +375,12 @@ void Dispatch(const bf16* a, const bf16* b, void* out, TcArgs p){
         p.splits = std::min(want, max_splits);
         p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;
         p.splits = (p.gk + p.k_per_split - 1) / p.k_per_split;
+    }
+    if (BigTiles()){
+        if (MODE == WGRAD && bm == 64) LaunchStages<MODE, 64, 128, 2, 2>(a, b, out, p);
+        else if (bn == 64 && MODE != WGRAD) LaunchStages<MODE, 256, 64, 4, 1>(a, b, out, p);
+        else LaunchStages<MODE, 128, 128, 2, 2>(a, b, out, p);
+        return;
     }
     if (MODE == WGRAD && bm == 64){
         if (bn == 64) LaunchStages<MODE, 64, 64>(a, b, out, p);
