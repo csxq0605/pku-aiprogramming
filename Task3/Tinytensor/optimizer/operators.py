@@ -38,9 +38,9 @@ class Tensor(Value):
             device = device if device else cpu()
             cached_data = Tensor._array_from_numpy(array, device=device, dtype=dtype)
         elif isinstance(array, tf) or isinstance(array, ti):
+            # 直接持有 GPU 张量，不拷回 CPU
             device = device if device else cpu()
-            #print("Tensor from myTensor")
-            cached_data = Tensor._array_from_mytensor(array, device=device, dtype=dtype)
+            cached_data = array
 
         self._init(
             None,
@@ -55,7 +55,7 @@ class Tensor(Value):
     
     @staticmethod
     def _array_from_mytensor(mytensor, device, dtype):
-        return np.array(mytensor.get_data(), dtype=dtype).reshape(mytensor.get_shape())
+        return np.asarray(mytensor.numpy(), dtype=dtype)
 
     @staticmethod
     def make_from_op(op: Op, inputs: List["Value"]):
@@ -95,17 +95,34 @@ class Tensor(Value):
     def detach(self):
         return Tensor.make_const(self.realize_cached_data())
 
+    def realize_cached_data(self):
+        """
+        GPU 算子（op.gpu = True）直接接收 GPU 张量；
+        其余 numpy 实现的算子先把输入拷回 numpy
+        """
+        if self.cached_data is not None:
+            return self.cached_data
+        inputs = [x.realize_cached_data() for x in self.inputs]
+        if not getattr(self.op, "gpu", False):
+            inputs = [_np(a) for a in inputs]
+        self.cached_data = self.op.compute(*inputs)
+        return self.cached_data
+
     @property
     def shape(self):
-        if isinstance(self.cached_data, tuple):
-            return [1]
-        return self.realize_cached_data().shape
+        data = self.realize_cached_data()
+        if isinstance(data, (tf, ti)):
+            return tuple(data.get_shape())
+        return data.shape
 
     @property
     def dtype(self):
-        if isinstance(self.cached_data, tuple):
-            return float
-        return self.realize_cached_data().dtype
+        data = self.realize_cached_data()
+        if isinstance(data, tf):
+            return np.dtype(np.float32)
+        if isinstance(data, ti):
+            return np.dtype(np.int32)
+        return data.dtype
 
     @property
     def device(self):
@@ -114,20 +131,19 @@ class Tensor(Value):
 
     def backward(self, out_grad=None):
         if out_grad is None:
-            array = np.ones(self.shape, dtype=self.dtype)
-            out_grad = Tensor(array, device=self.device, dtype=self.dtype, requires_grad=False)
+            array = np.ones(self.shape, dtype=np.float32)
+            out_grad = Tensor(array, device=self.device, requires_grad=False)
         compute_gradient_of_variables(self, out_grad)
         
 
     def __repr__(self):
-        return "Tensor(" + str(self.realize_cached_data()) + ")"
+        return "Tensor(" + str(self.numpy()) + ")"
 
     def __str__(self):
-        return self.realize_cached_data().__str__()
+        return self.numpy().__str__()
 
     def numpy(self):
-        data = self.realize_cached_data()
-        return data
+        return _np(self.realize_cached_data())
 
 
     def __add__(self, other):
@@ -191,9 +207,34 @@ class TensorOp(Op):
         return Tensor.make_from_op(self, args)
 
 
+def _gpu(array):
+    """转成 GPU 上的 Tensor_float；已经在 GPU 上则原样返回（注意不要原地修改返回值）"""
+    if isinstance(array, tf):
+        return array
+    return tf(np.ascontiguousarray(array, dtype=np.float32), "gpu")
+
+
+def _np(array):
+    """转成 numpy 数组"""
+    if isinstance(array, (tf, ti)):
+        return array.numpy()
+    return array
+
+
+def _grad(data):
+    """把算子算出的梯度包装成不需要再求导的 Tensor，GPU 上的梯度留在 GPU"""
+    if not isinstance(data, (tf, ti)):
+        data = np.asarray(data, dtype=np.float32)
+    return Tensor(data, requires_grad=False)
+
+
 class EWiseAdd(TensorOp):
-    def compute(self, a: np.ndarray, b: np.ndarray):
-        return a + b
+    gpu = True
+
+    def compute(self, a, b):
+        if isinstance(a, tf) and isinstance(b, tf) and a.get_shape() == b.get_shape():
+            return a + b
+        return _np(a) + _np(b)
 
     def gradient(self, out_grad: Tensor, node: Tensor):
         return out_grad, out_grad
@@ -346,10 +387,15 @@ def transpose(a, axes=None):
 
 
 class Reshape(TensorOp):
+    gpu = True
+
     def __init__(self, shape):
         self.shape = shape
 
     def compute(self, a):
+        if isinstance(a, tf):
+            new_shape = list(np.empty(a.get_shape(), dtype=np.bool_).reshape(self.shape).shape)
+            return tf(a).resize(new_shape)
         return np.reshape(a, self.shape)
         
 
@@ -476,19 +522,15 @@ def exp(a):
 
 
 class ReLU(TensorOp):
+    gpu = True
+
     def compute(self, a):
-        input = tf(a, "gpu")
-        output = input.ReluForward()
-        output = np.array(output.get_data()).reshape(input.get_shape())
-        return output
-        
+        return _gpu(a).ReluForward()
 
     def gradient(self, out_grad, node):
-        input = tf(node.inputs[0].realize_cached_data(), "gpu")
-        grad_output = tf(out_grad.realize_cached_data(), "gpu")
-        grad_input = input.ReluBackward(grad_output)
-        return Tensor(grad_input)
-        
+        input = _gpu(node.inputs[0].realize_cached_data())
+        grad_output = _gpu(out_grad.realize_cached_data())
+        return _grad(input.ReluBackward(grad_output))
 
 
 def relu(a):
@@ -496,35 +538,42 @@ def relu(a):
 
 
 class FC(TensorOp):
+    gpu = True
+
     def __init__(self, use_bias):
         self.use_bias = use_bias
 
     def compute(self, input, weight, bias):
-        input_tensor = tf(input, "gpu")
-        weight_tensor = tf(weight, "gpu")
-        bias_tensor = tf(bias, "gpu")
+        input_tensor = _gpu(input)
+        weight_tensor = _gpu(weight)
+        bias_tensor = _gpu(bias)
         if not self.use_bias:
-            bias_tensor.zeros()
+            bias_tensor = tf(bias_tensor).zeros()
         output_shape = [input_tensor.get_shape()[0], weight_tensor.get_shape()[1]]
         output = tf(output_shape, "gpu")
         ml.FcForward(input_tensor, output, weight_tensor, bias_tensor)
-        output = np.array(output.get_data()).reshape(output_shape)
         return output
     
     def gradient(self, out_grad, node):
         input, weight, bias = node.inputs
-        input_tensor = tf(input.realize_cached_data(), "gpu")
-        weight_tensor = tf(weight.realize_cached_data(), "gpu")
-        bias_tensor = tf(bias.realize_cached_data(), "gpu")
-        grad_output = tf(out_grad.realize_cached_data(), "gpu")
-        output = tf(grad_output.get_shape(), "gpu")
-        grad_input = tf(input_tensor.get_shape(), "gpu")
+        input_tensor = _gpu(input.realize_cached_data())
+        weight_tensor = _gpu(weight.realize_cached_data())
+        bias_tensor = _gpu(bias.realize_cached_data())
+        grad_output = _gpu(out_grad.realize_cached_data())
         grad_weight = tf(weight_tensor.get_shape(), "gpu")
         grad_bias = tf(bias_tensor.get_shape(), "gpu")
-        ml.FcBackward(input_tensor, output, weight_tensor, bias_tensor, grad_input, grad_output, grad_weight, grad_bias)
+        if not input.requires_grad:
+            # 输入不需要梯度（例如网络的输入数据）：只计算参数梯度
+            ml.FcBackwardParams(input_tensor, weight_tensor, bias_tensor, grad_output, grad_weight, grad_bias)
+            if not self.use_bias:
+                grad_bias.zeros()
+            return None, _grad(grad_weight), _grad(grad_bias)
+        grad_input = tf(input_tensor.get_shape(), "gpu")
+        # 第二个参数（前向输出）在反向中用不到，传 grad_output 占位，避免多分配一块显存
+        ml.FcBackward(input_tensor, grad_output, weight_tensor, bias_tensor, grad_input, grad_output, grad_weight, grad_bias)
         if not self.use_bias:
             grad_bias.zeros()
-        return Tensor(grad_input), Tensor(grad_weight), Tensor(grad_bias)
+        return _grad(grad_input), _grad(grad_weight), _grad(grad_bias)
 
 
 
@@ -532,7 +581,34 @@ def fc(input, weight, bias, use_bias=True):
     return FC(use_bias)(input, weight, bias)
 
 
+class FCReLU(TensorOp):
+    """relu(fc(x))：bias 与 ReLU 在一个 kernel 里完成，反向时 ReLU 掩码与 bias 梯度也在一个 kernel 里完成"""
+    gpu = True
+
+    def compute(self, input, weight, bias):
+        output = tf([1], "gpu")
+        ml.FcReluForward(_gpu(input), output, _gpu(weight), _gpu(bias))
+        return output
+
+    def gradient(self, out_grad, node):
+        input, weight, bias = node.inputs
+        need_grad_input = input.requires_grad
+        grad_input = tf([1], "gpu")
+        grad_weight = tf([1], "gpu")
+        grad_bias = tf([1], "gpu")
+        ml.FcReluBackward(_gpu(input.realize_cached_data()), _gpu(node.realize_cached_data()),
+                          _gpu(weight.realize_cached_data()), grad_input, _gpu(out_grad.realize_cached_data()),
+                          grad_weight, grad_bias, need_grad_input)
+        return (_grad(grad_input) if need_grad_input else None), _grad(grad_weight), _grad(grad_bias)
+
+
+def fc_relu(input, weight, bias):
+    return FCReLU()(input, weight, bias)
+
+
 class Conv(TensorOp):
+    gpu = True
+
     def __init__(self, pad_h, pad_w, stride_h, stride_w):
         self.pad_h = pad_h
         self.pad_w = pad_w
@@ -540,26 +616,28 @@ class Conv(TensorOp):
         self.stride_w = stride_w
 
     def compute(self, input, weight):
-        input_tensor = tf(input, "gpu")
-        weight_tensor = tf(weight, "gpu")
+        input_tensor = _gpu(input)
+        weight_tensor = _gpu(weight)
         output_shape = [input_tensor.get_shape()[0], weight_tensor.get_shape()[0],
                         (input_tensor.get_shape()[2] + 2 * self.pad_h - weight_tensor.get_shape()[2]) // self.stride_h + 1,
                         (input_tensor.get_shape()[3] + 2 * self.pad_w - weight_tensor.get_shape()[3]) // self.stride_w + 1]
         output = tf(output_shape, "gpu")
         ml.ConvForward(input_tensor, output, weight_tensor, self.pad_h, self.pad_w, self.stride_h, self.stride_w)
-        output = np.array(output.get_data()).reshape(output_shape)
         return output
     
     def gradient(self, out_grad, node):
         input, weight = node.inputs
-        input_tensor = tf(input.realize_cached_data(), "gpu")
-        weight_tensor = tf(weight.realize_cached_data(), "gpu")
-        grad_output = tf(out_grad.realize_cached_data(), "gpu")
-        output = tf(grad_output.get_shape(), "gpu")
-        grad_input = tf(input_tensor.get_shape(), "gpu")
+        input_tensor = _gpu(input.realize_cached_data())
+        weight_tensor = _gpu(weight.realize_cached_data())
+        grad_output = _gpu(out_grad.realize_cached_data())
         grad_weight = tf(weight_tensor.get_shape(), "gpu")
-        ml.ConvBackward(input_tensor, output, weight_tensor, grad_input, grad_output, grad_weight, self.pad_h, self.pad_w, self.stride_h, self.stride_w)
-        return Tensor(grad_input), Tensor(grad_weight)
+        if not input.requires_grad:
+            # 输入不需要梯度（例如网络的输入图像）：只计算卷积核梯度
+            ml.ConvBackwardWeight(input_tensor, weight_tensor, grad_output, grad_weight, self.pad_h, self.pad_w, self.stride_h, self.stride_w)
+            return None, _grad(grad_weight)
+        grad_input = tf(input_tensor.get_shape(), "gpu")
+        ml.ConvBackward(input_tensor, grad_output, weight_tensor, grad_input, grad_output, grad_weight, self.pad_h, self.pad_w, self.stride_h, self.stride_w)
+        return _grad(grad_input), _grad(grad_weight)
 
 
 
@@ -568,6 +646,8 @@ def conv(input, weight, pad_h = 0, pad_w = 0, stride_h = 1, stride_w = 1):
 
 
 class MaxPool(TensorOp):
+    gpu = True
+
     def __init__(self, kernel_shape, pad_h, pad_w, stride_h, stride_w):
         self.kernel_shape = kernel_shape
         self.pad_h = pad_h
@@ -577,23 +657,22 @@ class MaxPool(TensorOp):
         self.mask = None
 
     def compute(self, input):
-        input_tensor = tf(input, "gpu")
+        input_tensor = _gpu(input)
         output_shape = [input_tensor.get_shape()[0], input_tensor.get_shape()[1],
                         (input_tensor.get_shape()[2] + 2 * self.pad_h - self.kernel_shape[0]) // self.stride_h + 1,
                         (input_tensor.get_shape()[3] + 2 * self.pad_w - self.kernel_shape[1]) // self.stride_w + 1]
         output = tf(output_shape, "gpu")
         self.mask = tf(output_shape, "gpu")
         ml.MaxPoolingForward(input_tensor, output, self.mask, self.kernel_shape, self.pad_h, self.pad_w, self.stride_h, self.stride_w)
-        output = np.array(output.get_data()).reshape(output_shape)
         return output
     
     def gradient(self, out_grad, node):
         input = node.inputs[0]
-        input_shape = input.realize_cached_data().shape
-        grad_output = tf(out_grad.realize_cached_data(), "gpu")
+        input_shape = list(input.shape)
+        grad_output = _gpu(out_grad.realize_cached_data())
         grad_input = tf(input_shape, "gpu")
         ml.MaxPoolingBackward(grad_output, self.mask, grad_input, input_shape, self.kernel_shape, self.pad_h, self.pad_w, self.stride_h, self.stride_w)
-        return Tensor(grad_input)
+        return _grad(grad_input)
     
 
 
@@ -601,32 +680,63 @@ def maxpool(input, kernel_shape = [2, 2], pad_h = 0, pad_w = 0, stride_h = 2, st
     return MaxPool(kernel_shape, pad_h, pad_w, stride_h, stride_w)(input)
 
 
+class ConvReluMaxPool(TensorOp):
+    """
+    maxpool(relu(conv(x)))，池化窗口 2x2、步长 2。三步在一个 kernel 里完成：卷积结果只留在寄存器里，不写回显存；
+    反向由 argmax 直接还原卷积输出的梯度，不需要清零和 atomicAdd
+    """
+    gpu = True
+
+    def __init__(self, pad_h, pad_w, stride_h, stride_w):
+        self.pad_h, self.pad_w, self.stride_h, self.stride_w = pad_h, pad_w, stride_h, stride_w
+        self.argmax = None
+
+    def compute(self, input, weight):
+        output = tf([1], "gpu")
+        self.argmax = ti([1], "gpu")
+        ml.ConvReluMaxPoolForward(_gpu(input), _gpu(weight), output, self.argmax,
+                                  self.pad_h, self.pad_w, self.stride_h, self.stride_w)
+        return output
+
+    def gradient(self, out_grad, node):
+        input, weight = node.inputs
+        need_grad_input = input.requires_grad
+        grad_input = tf([1], "gpu")
+        grad_weight = tf([1], "gpu")
+        ml.ConvReluMaxPoolBackward(_gpu(input.realize_cached_data()), _gpu(weight.realize_cached_data()),
+                                   _gpu(out_grad.realize_cached_data()), self.argmax, grad_input, grad_weight,
+                                   self.pad_h, self.pad_w, self.stride_h, self.stride_w, need_grad_input)
+        return (_grad(grad_input) if need_grad_input else None), _grad(grad_weight)
+
+
+def conv_relu_maxpool(input, weight, pad_h=0, pad_w=0, stride_h=1, stride_w=1):
+    """等价于 maxpool(relu(conv(...)))；通道数较大（Cin * kh * kw > 256）时退回三个独立算子"""
+    _, c_in, kh, kw = weight.shape
+    if c_in * kh * kw > 256:
+        return maxpool(relu(conv(input, weight, pad_h, pad_w, stride_h, stride_w)))
+    return ConvReluMaxPool(pad_h, pad_w, stride_h, stride_w)(input, weight)
+
+
 class Softmaxloss(TensorOp):
+    """numpy 实现的 softmax 交叉熵，返回 batch 平均 loss（作为参考实现）"""
+
     def __init__(self, labels):
         self.softmax = None
-        self.labels = labels.realize_cached_data()
+        self.labels = _np(labels.realize_cached_data()).astype(np.int64)
         self.batchsize = self.labels.shape[0]
 
     def compute(self, z):
-        z_exp = np.exp(z - np.max(z, axis=1, keepdims=True))
-        z = z_exp / np.sum(z_exp, axis=1, keepdims=True)
-        self.softmax = z
-        error = np.sum(z.argmax(axis=1) != self.labels) / (self.batchsize*10)
-        loss = 0.0
-        for i in range(self.batchsize):
-            logits = z[i]
-            logits = logits - np.max(logits)
-            correct_logit = logits[self.labels[i]]
-            loss += np.log(np.sum(np.exp(logits - correct_logit))) / (self.batchsize*10)
-        return loss, error
-    
+        z = z - np.max(z, axis=1, keepdims=True)
+        log_prob = z - np.log(np.sum(np.exp(z), axis=1, keepdims=True))
+        self.softmax = np.exp(log_prob)
+        loss = -np.mean(log_prob[np.arange(self.batchsize), self.labels])
+        return np.array(loss, dtype=np.float32)
+
     def gradient(self, out_grad, node):
         y_onehot = np.zeros_like(self.softmax)
         y_onehot[np.arange(self.batchsize), self.labels] = 1
         dZ = (self.softmax - y_onehot) / self.batchsize
-        #print(dZ)
-        return Tensor(dZ)
-    
+        return _grad(dZ * out_grad.numpy())
 
 
 def softmaxloss(X, y):
@@ -634,32 +744,30 @@ def softmaxloss(X, y):
 
 
 class Softmaxcrossentropyloss(TensorOp):
+    """CUDA 实现的 softmax 交叉熵，返回 GPU 上的 batch 平均 loss（形状 [1]），读取时才同步"""
+    gpu = True
+
     def __init__(self, labels):
-        self.labels = labels.realize_cached_data()
-        self.batchsize = self.labels.shape[0]
-        self.softmax = None
+        labels = labels.realize_cached_data()
+        if isinstance(labels, ti):
+            self.labels = labels
+        else:
+            self.labels = ti(np.ascontiguousarray(labels, dtype=np.int32), "gpu")
+        self.grad = None
 
     def compute(self, input):
-        input_tensor = tf(input, "gpu")
-        labels_tensor = ti(self.labels.shape, "gpu", self.labels)
-        output = tf(input_tensor.get_shape(), "gpu")
-        ml.SoftmaxForward(input_tensor, output)
-        self.softmax = np.array(output.get_data()).reshape(input_tensor.get_shape())
-        error = np.sum(self.softmax.argmax(axis=1) != self.labels)/(10*self.batchsize)
+        # 一个 kernel 同时算出 batch 平均 loss 和对 logits 的梯度 (softmax - onehot) / N
         loss = tf([1], "gpu")
-        ml.CrossEntropyLoss(output, labels_tensor, loss)
-        loss = loss.get_data()[0]/(10*self.batchsize)
-        return loss, error
-        
+        self.grad = tf([1], "gpu")
+        ml.SoftmaxCrossEntropy(_gpu(input), self.labels, loss, self.grad)
+        return loss
+
     def gradient(self, out_grad, node):
-        output = tf(self.softmax, "gpu")
-        labels_tensor = ti(self.labels.shape, "gpu", self.labels)
-        grad_input = tf(output.get_shape(), "gpu")
-        #print("@backward")
-        ml.CrossEntropyLossBackward(output, labels_tensor, grad_input)
-        grad_input.mults(1/self.batchsize)
-        return Tensor(grad_input)
-    
+        scale = float(np.asarray(_np(out_grad.realize_cached_data())).reshape(-1)[0])
+        if scale == 1.0:
+            return _grad(self.grad)
+        return _grad(tf(self.grad).mults(scale))
+
 
 def softmaxcrossentropyloss(X, y):
     return Softmaxcrossentropyloss(y)(X)

@@ -45,6 +45,9 @@ def compute_gradient_of_variables(output_tensor, out_grad):
     # 根据我们要对其求梯度的 output_node，以逆拓扑排序遍历图。
     reverse_topo_order = list(reversed(find_topo_sort([output_tensor])))
     for node in reverse_topo_order:
+        if node not in node_to_output_grads_list:
+            # 没有任何梯度流到该节点（它的所有使用者都不需要它的梯度）
+            continue
         autodiff_joints = node_to_output_grads_list[node]
         v_i = autodiff_joints[0]
         for i in range(len(autodiff_joints)):
@@ -57,5 +60,8 @@ def compute_gradient_of_variables(output_tensor, out_grad):
             continue
         node_grads = node.op.gradient_as_tuple(v_i, node)
         for node_input, node_grad in zip(node.inputs, node_grads):
+            if node_grad is None:
+                # 算子判定该输入不需要梯度
+                continue
             node_to_output_grads_list.setdefault(node_input, [])
             node_to_output_grads_list[node_input].append(node_grad)
