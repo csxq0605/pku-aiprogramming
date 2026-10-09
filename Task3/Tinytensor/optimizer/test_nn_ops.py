@@ -86,50 +86,51 @@ def test_conv():
 
 
 def test_batchnorm():
+    # C=24 走标量 kernel；C=64 / 512 走向量化 kernel（8 个通道一组，C/8 整除 256）
     for dtype in DTYPES:
-        for res, relu in ((False, True), (True, True), (False, False), (True, False)):
-            M, C = (4, 6, 6), 24
-            x = rounded(rng.standard_normal(M + (C,)) * 2 + 0.5, dtype)
-            r = rounded(rng.standard_normal(M + (C,)), dtype)
-            gamma = rng.uniform(0.5, 1.5, C).astype(np.float32)
-            beta = rng.standard_normal(C).astype(np.float32)
-            xt, rt, gt, bt = tt_t(x), tt_t(r), tt_t(gamma), tt_t(beta)
-            rm, rv = torch.zeros(C, dtype=torch.float64), torch.ones(C, dtype=torch.float64)
-            yt = F.batch_norm(xt.reshape(-1, C), rm, rv, gt, bt, training=True, momentum=0.1, eps=1e-5).reshape(xt.shape)
-            if res:
-                yt = yt + rt
-            if relu:
-                yt = torch.relu(yt)
-            dy = rounded(rng.standard_normal(yt.shape), dtype)
-            yt.backward(torch.tensor(dy, dtype=torch.float64))
+        for M, C in (((4, 6, 6), 24), ((4, 9, 9), 64), ((2, 5, 7), 512)):
+            for res, relu in ((False, True), (True, True), (False, False), (True, False)):
+                x = rounded(rng.standard_normal(M + (C,)) * 2 + 0.5, dtype)
+                r = rounded(rng.standard_normal(M + (C,)), dtype)
+                gamma = rng.uniform(0.5, 1.5, C).astype(np.float32)
+                beta = rng.standard_normal(C).astype(np.float32)
+                xt, rt, gt, bt = tt_t(x), tt_t(r), tt_t(gamma), tt_t(beta)
+                rm, rv = torch.zeros(C, dtype=torch.float64), torch.ones(C, dtype=torch.float64)
+                yt = F.batch_norm(xt.reshape(-1, C), rm, rv, gt, bt, training=True, momentum=0.1, eps=1e-5).reshape(xt.shape)
+                if res:
+                    yt = yt + rt
+                if relu:
+                    yt = torch.relu(yt)
+                dy = rounded(rng.standard_normal(yt.shape), dtype)
+                yt.backward(torch.tensor(dy, dtype=torch.float64))
 
-            X = to_tt(x, dtype)
-            R = to_tt(r, dtype) if res else None
-            G, B = tf(gamma, "gpu"), tf(beta, "gpu")
-            run_m, run_v, stats = zeros_f([C]), tf(np.ones(C, np.float32), "gpu"), tf([1], "gpu")
-            y = empty(dtype)
-            nn.batchnorm_train(X, G, B, run_m, run_v, stats, y, R, relu, 0.1, 1e-5)
-            tag = "bn(res={}, relu={})".format(res, relu)
-            check(tag + " fwd", y.numpy(), yt.detach().numpy(), dtype)
-            check(tag + " running_mean", run_m.numpy(), rm.numpy(), dtype)
-            check(tag + " running_var", run_v.numpy(), rv.numpy(), dtype)
-            dx, dg, db = empty(dtype), zeros_f([C]), zeros_f([C])
-            dres = empty(dtype) if res else None
-            nn.batchnorm_backward(X, y, to_tt(dy, dtype), G, stats, dx, dg, db, dres, relu, 1e-5)
-            check(tag + " dx", dx.numpy(), xt.grad.numpy(), dtype, 5e-5 if dtype == "fp32" else 4e-2)
-            check(tag + " dgamma", dg.numpy(), gt.grad.numpy(), dtype)
-            check(tag + " dbeta", db.numpy(), bt.grad.numpy(), dtype)
-            if res:
-                check(tag + " dres", dres.numpy(), rt.grad.numpy(), dtype)
-            ye = empty(dtype)
-            nn.batchnorm_eval(X, G, B, run_m, run_v, ye, R, relu, 1e-5)
-            want = F.batch_norm(torch.tensor(x).reshape(-1, C), torch.tensor(run_m.numpy()), torch.tensor(run_v.numpy()),
-                                torch.tensor(gamma), torch.tensor(beta), training=False, eps=1e-5).reshape(x.shape)
-            if res:
-                want = want + torch.tensor(r)
-            if relu:
-                want = torch.relu(want)
-            check(tag + " eval", ye.numpy(), want.numpy(), dtype)
+                X = to_tt(x, dtype)
+                R = to_tt(r, dtype) if res else None
+                G, B = tf(gamma, "gpu"), tf(beta, "gpu")
+                run_m, run_v, stats = zeros_f([C]), tf(np.ones(C, np.float32), "gpu"), tf([1], "gpu")
+                y = empty(dtype)
+                nn.batchnorm_train(X, G, B, run_m, run_v, stats, y, R, relu, 0.1, 1e-5)
+                tag = "bn(C={}, res={}, relu={})".format(C, res, relu)
+                check(tag + " fwd", y.numpy(), yt.detach().numpy(), dtype)
+                check(tag + " running_mean", run_m.numpy(), rm.numpy(), dtype)
+                check(tag + " running_var", run_v.numpy(), rv.numpy(), dtype)
+                dx, dg, db = empty(dtype), zeros_f([C]), zeros_f([C])
+                dres = empty(dtype) if res else None
+                nn.batchnorm_backward(X, y, to_tt(dy, dtype), G, stats, dx, dg, db, dres, relu, 1e-5)
+                check(tag + " dx", dx.numpy(), xt.grad.numpy(), dtype, 5e-5 if dtype == "fp32" else 4e-2)
+                check(tag + " dgamma", dg.numpy(), gt.grad.numpy(), dtype)
+                check(tag + " dbeta", db.numpy(), bt.grad.numpy(), dtype)
+                if res:
+                    check(tag + " dres", dres.numpy(), rt.grad.numpy(), dtype)
+                ye = empty(dtype)
+                nn.batchnorm_eval(X, G, B, run_m, run_v, ye, R, relu, 1e-5)
+                want = F.batch_norm(torch.tensor(x).reshape(-1, C), torch.tensor(run_m.numpy()), torch.tensor(run_v.numpy()),
+                                    torch.tensor(gamma), torch.tensor(beta), training=False, eps=1e-5).reshape(x.shape)
+                if res:
+                    want = want + torch.tensor(r)
+                if relu:
+                    want = torch.relu(want)
+                check(tag + " eval", ye.numpy(), want.numpy(), dtype)
 
 
 def test_layernorm():
