@@ -42,6 +42,8 @@ def parse_args(extra=None):
     p.add_argument("--dataset", default="tiny", choices=sorted(DATASETS))
     p.add_argument("--dtype", default="fp32", choices=["fp32", "bf16"])
     p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("--stop-epoch", type=int, default=None,
+                   help="学习率仍按 --epochs 的完整计划，但只训练前 N 个 epoch（与长训练在第 N 个 epoch 处逐步可比）")
     p.add_argument("--batch", type=int, default=128)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--wd", type=float, default=None)
@@ -170,7 +172,8 @@ def run(trainer, args, framework):
     else:
         history = []
         total_time = 0.0
-        for epoch in range(args.epochs):
+        path = os.path.join(RESULTS, "train_" + name + ".json")
+        for epoch in range(min(args.epochs, args.stop_epoch or args.epochs)):
             trainer.begin_epoch(epoch_order(args.seed, epoch, n_train))
             trainer.sync()
             t0 = time.perf_counter()
@@ -185,10 +188,12 @@ def run(trainer, args, framework):
                                 val_loss=val_loss, val_acc=val_acc))
             print("epoch {:3d} | {:7.1f}s | train loss {:.4f} acc {:.4f} | val loss {:.4f} acc {:.4f}".format(
                 epoch + 1, dt, loss_sum / n, correct / n, val_loss, val_acc), flush=True)
-        record.update(epochs=args.epochs, history=history, train_seconds=total_time,
-                      best_val_acc=max(h["val_acc"] for h in history), final_val_acc=history[-1]["val_acc"],
-                      peak_mem_mb=trainer.peak_memory_mb())
-        path = os.path.join(RESULTS, "train_" + name + ".json")
+            # 每个 epoch 都写一次，长训练中途被打断也保留已完成的部分
+            record.update(epochs=args.epochs, stop_epoch=len(history), history=history, train_seconds=total_time,
+                          best_val_acc=max(h["val_acc"] for h in history), final_val_acc=history[-1]["val_acc"],
+                          peak_mem_mb=trainer.peak_memory_mb())
+            with open(path, "w") as f:
+                json.dump(record, f, indent=1)
     with open(path, "w") as f:
         json.dump(record, f, indent=1)
     print("saved", path)
