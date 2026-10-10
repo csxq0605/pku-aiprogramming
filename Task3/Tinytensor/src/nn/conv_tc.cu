@@ -79,8 +79,12 @@ template <int MODE> struct Layout{ static constexpr bool A_RK = MODE != WGRAD; s
 // block tile BM x BN，WGM x WGN 个 warp，每个 warp 负责 (BM/WGM) x (BN/WGN)。
 // 配置见 Dispatch：RTX 40 系列用 8 个 warp 的 128x128 / 128x64；A100 这类共享内存大的卡用 4 个 warp、每个 warp 64x64 的大 tile
 // （和 cuDNN 在 A100 上选的 256x64 / 128x128 一致：每个 k16 步 MMA 与 ldmatrix 之比更高）
+// 每个 SM 同时驻留的 block 数：8 个 warp 的 256x128 / 128x256 大 tile（每个 warp 64x64）每个 SM 只放 1 个，
+// 换来每线程 255 个寄存器（fragment 双缓冲）；其余配置 2 个
+template <int BM, int BN, int THREADS> struct TcMinBlocks{ static constexpr int value = BM * BN >= 256 * 128 && THREADS >= 256 ? 1 : 2; };
+
 template <int MODE, int BM, int BN, int STAGES, int WGM, int WGN>
-__global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restrict__ a, const bf16* __restrict__ b, void* __restrict__ out,
+__global__ void __launch_bounds__(WGM * WGN * 32, TcMinBlocks<BM, BN, WGM * WGN * 32>::value) ConvTc(const bf16* __restrict__ a, const bf16* __restrict__ b, void* __restrict__ out,
                                                   const TcArgs p){
     extern __shared__ __align__(128) unsigned char smem_raw[];
     bf16* As = (bf16*)smem_raw;                       // [STAGES][BM * BK]
@@ -258,7 +262,8 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
     // 寄存器放不下两份 fragment 时（8 个 warp 的 128x128：每线程上限 128 个寄存器）退回单缓冲：每个 k16 先读再算
     constexpr int KS = BK / 16;
     static_assert(KS % 2 == 0, "BK 必须是 32 的倍数");
-    constexpr int MAX_REGS = 65536 / 2 / THREADS > 255 ? 255 : 65536 / 2 / THREADS;
+    constexpr int MINB = TcMinBlocks<BM, BN, THREADS>::value;
+    constexpr int MAX_REGS = 65536 / MINB / THREADS > 255 ? 255 : 65536 / MINB / THREADS;
     constexpr bool FRAG_DB = MI * NT * 4 + 2 * (MI * 4 + NT * 2) <= MAX_REGS - 40;
     unsigned af[FRAG_DB ? 2 : 1][MI][4], bfr[FRAG_DB ? 2 : 1][NT][2];
     auto load_frag = [&](int buf, int stage, int kk){
@@ -423,6 +428,9 @@ __global__ void WsToBf16(const float4* __restrict__ ws, __nv_bfloat162* __restri
 int ChooseSplits(int blocks, int slots, int ktiles, int gemm_k){
     static int forced = [](){ const char* e = getenv("TT_TC_SPLITK"); return e ? atoi(e) : -1; }();
     if (forced >= 0) return std::max(1, std::min(forced, std::max(1, ktiles / 4)));
+    // A100 实测：只有 block 数不足一个波次时（如 ResNet18 第 4 段 128 个 block / 216 个槽位）切分才划算；
+    // 已经超过一个波次的（第 3 段 256 个 block）切了反而变慢，部分和的读写抵掉了填满尾波的收益
+    if (blocks >= slots) return 1;
     auto waves = [&](long long b){ return (b + slots - 1) / slots; };
     const double ideal = (double)blocks * ktiles / slots;
     double best = (double)waves(blocks) * ktiles;
@@ -541,6 +549,26 @@ void Dispatch(const bf16* a, const bf16* b, void* out, TcArgs p){
         p.splits = std::min(want, max_splits);
         p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;
         p.splits = (p.gk + p.k_per_split - 1) / p.k_per_split;
+    }
+    // 8 个 warp、每个 warp 64x64 的大 tile：block 数至少 4 个波次（每个 SM 1 个）才用，否则尾波浪费抵掉收益。
+    // TT_TC_HUGE=0 关闭（对照实验用）
+    static const bool huge_ok = [](){ const char* e = getenv("TT_TC_HUGE"); return !(e && atoi(e) == 0); }() && Stages() == 4;
+    if (huge_ok){
+        const int sms = DeviceSmCount();
+        if (MODE == WGRAD && p.gm >= 128 && p.gn >= 256){
+            const int tiles = ((p.gm + 127) / 128) * ((p.gn + 255) / 256) * p.g.groups;
+            const int want = std::max(1, 3 * sms / 2 / tiles), max_splits = std::max(1, p.gk / (BK * 8));
+            p.splits = std::min(want, max_splits);
+            p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;
+            p.splits = (p.gk + p.k_per_split - 1) / p.k_per_split;
+            LaunchTc<MODE, 128, 256, 4, 2, 4>(a, b, out, p);
+            return;
+        }
+        if (MODE != WGRAD && p.gn >= 128){
+            const int phases = MODE == DGRAD ? p.g.stride_h * p.g.stride_w : 1;
+            const long long blocks = (long long)((p.gm + 255) / 256) * phases * ((p.gn + 127) / 128) * p.g.groups;
+            if (blocks >= 4LL * sms){ LaunchTc<MODE, 256, 128, 4, 4, 2>(a, b, out, p); return; }
+        }
     }
     const int big = BigTiles();
     if (big){
