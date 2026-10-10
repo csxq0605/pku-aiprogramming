@@ -1,0 +1,19 @@
+{
+ "arch": "vit_tiny",
+ "dtype": "bf16",
+ "framework": "TinyTensor (graph)",
+ "batch": 256,
+ "optimizer": "adamw",
+ "lr": 0.001,
+ "wd": 0.05,
+ "graph": true,
+ "chunk": 50,
+ "params": 5426888,
+ "bench_steps": 50,
+ "warmup_seconds": 1.5296536239998204,
+ "seconds": 0.7029188229998908,
+ "ms_per_step": 14.058376459997817,
+ "images_per_sec": 18209.784090533576,
+ "train_loss": 4.8589838663736975,
+ "peak_mem_mb": 2734
+}

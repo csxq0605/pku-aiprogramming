@@ -1,0 +1,19 @@
+{
+ "arch": "resnet18",
+ "dtype": "fp32",
+ "framework": "TinyTensor (graph, unfused)",
+ "batch": 256,
+ "optimizer": "sgd",
+ "lr": 0.1,
+ "wd": 0.0005,
+ "graph": true,
+ "chunk": 50,
+ "params": 11271432,
+ "bench_steps": 50,
+ "warmup_seconds": 6.319608895999863,
+ "seconds": 4.383745883999836,
+ "ms_per_step": 87.67491767999672,
+ "images_per_sec": 2919.877278178581,
+ "train_loss": 4.340731811523438,
+ "peak_mem_mb": 4626
+}

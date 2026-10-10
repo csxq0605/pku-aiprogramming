@@ -1,0 +1,19 @@
+{
+ "arch": "vgg16",
+ "dtype": "fp32",
+ "framework": "TinyTensor (eager)",
+ "batch": 256,
+ "optimizer": "sgd",
+ "lr": 0.05,
+ "wd": 0.0005,
+ "graph": false,
+ "chunk": 50,
+ "params": 14821512,
+ "bench_steps": 50,
+ "warmup_seconds": 11.241990716000146,
+ "seconds": 7.968568371999936,
+ "ms_per_step": 159.37136743999872,
+ "images_per_sec": 1606.3111217037197,
+ "train_loss": 4.299506123860677,
+ "peak_mem_mb": 4256
+}

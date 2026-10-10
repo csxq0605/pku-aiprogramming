@@ -1,0 +1,19 @@
+{
+ "arch": "vit_tiny",
+ "dtype": "bf16",
+ "framework": "PyTorch 2.11.0+cu130 (graph)",
+ "batch": 256,
+ "optimizer": "adamw",
+ "lr": 0.001,
+ "wd": 0.05,
+ "graph": true,
+ "chunk": 50,
+ "params": 5426888,
+ "bench_steps": 50,
+ "warmup_seconds": 4.51506579800116,
+ "seconds": 1.0090558110005077,
+ "ms_per_step": 20.181116220010153,
+ "images_per_sec": 12685.1258973559,
+ "train_loss": 4.8585057576497395,
+ "peak_mem_mb": 3178
+}

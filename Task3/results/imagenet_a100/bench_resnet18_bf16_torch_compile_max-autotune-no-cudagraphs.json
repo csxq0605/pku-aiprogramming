@@ -1,0 +1,19 @@
+{
+ "arch": "resnet18",
+ "dtype": "bf16",
+ "framework": "PyTorch 2.11.0+cu130 compile(max-autotune-no-cudagraphs)",
+ "batch": 256,
+ "optimizer": "sgd",
+ "lr": 0.1,
+ "wd": 0.0005,
+ "graph": false,
+ "chunk": 50,
+ "params": 11271432,
+ "bench_steps": 50,
+ "warmup_seconds": 39.40069159600171,
+ "seconds": 0.5004482860003918,
+ "ms_per_step": 10.008965720007836,
+ "images_per_sec": 25577.06831668513,
+ "train_loss": 4.3480275472005205,
+ "peak_mem_mb": 2070
+}

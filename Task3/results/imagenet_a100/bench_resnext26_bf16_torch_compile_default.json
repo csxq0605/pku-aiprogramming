@@ -1,0 +1,19 @@
+{
+ "arch": "resnext26",
+ "dtype": "bf16",
+ "framework": "PyTorch 2.11.0+cu130 compile(default)",
+ "batch": 256,
+ "optimizer": "sgd",
+ "lr": 0.1,
+ "wd": 0.0005,
+ "graph": false,
+ "chunk": 50,
+ "params": 13742600,
+ "bench_steps": 50,
+ "warmup_seconds": 16.511013368999556,
+ "seconds": 1.1627253249989735,
+ "ms_per_step": 23.25450649997947,
+ "images_per_sec": 11008.618910069152,
+ "train_loss": 4.700075785319011,
+ "peak_mem_mb": 4372
+}

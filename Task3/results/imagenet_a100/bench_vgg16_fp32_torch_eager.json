@@ -1,0 +1,19 @@
+{
+ "arch": "vgg16",
+ "dtype": "fp32",
+ "framework": "PyTorch 2.11.0+cu130 (eager)",
+ "batch": 256,
+ "optimizer": "sgd",
+ "lr": 0.05,
+ "wd": 0.0005,
+ "graph": false,
+ "chunk": 50,
+ "params": 14821512,
+ "bench_steps": 50,
+ "warmup_seconds": 12.568941491999794,
+ "seconds": 4.624384470998848,
+ "ms_per_step": 92.48768941997696,
+ "images_per_sec": 2767.935944831865,
+ "train_loss": 4.291879272460937,
+ "peak_mem_mb": 4702
+}

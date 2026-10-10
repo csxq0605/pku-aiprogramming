@@ -1,0 +1,19 @@
+{
+ "arch": "resnet18",
+ "dtype": "bf16",
+ "framework": "TinyTensor (graph)",
+ "batch": 256,
+ "optimizer": "sgd",
+ "lr": 0.1,
+ "wd": 0.0005,
+ "graph": true,
+ "chunk": 50,
+ "params": 11271432,
+ "bench_steps": 50,
+ "warmup_seconds": 1.2413731940000616,
+ "seconds": 0.6747038189996601,
+ "ms_per_step": 13.494076379993203,
+ "images_per_sec": 18971.287310894037,
+ "train_loss": 4.337464396158854,
+ "peak_mem_mb": 2394
+}
