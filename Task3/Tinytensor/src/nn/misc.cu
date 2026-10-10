@@ -1,5 +1,6 @@
 // 池化、逐元素运算、ViT token 处理、损失、GPU 数据增强、优化器
 #include <cmath>
+#include <initializer_list>
 #include "nn_common.cuh"
 #include "nn_ops.h"
 
@@ -39,6 +40,93 @@ __global__ void MaxPool2x2Bwd(const T* __restrict__ dy, const unsigned char* __r
             if (arg[j] == ((h & 1) * 2 + (w & 1))) g = ToF(dy[j]);
         }
         dx[i] = FromF<T>(g);
+    }
+}
+
+// ---------- 向量化版本：每个线程处理 8 个连续通道（bf16 一次 16 字节）。条件：C % 8 == 0、H / W 为偶数、指针 16 字节对齐 ----------
+constexpr int VEC = 8;
+__device__ __forceinline__ void Load8(const float* p, float* v){
+    float4 a = __ldg((const float4*)p), b = __ldg((const float4*)p + 1);
+    v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w; v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w;
+}
+__device__ __forceinline__ void Load8(const bf16* p, float* v){
+    uint4 t = __ldg((const uint4*)p);
+    const __nv_bfloat162* h = (const __nv_bfloat162*)&t;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j){ float2 f = __bfloat1622float2(h[j]); v[2 * j] = f.x; v[2 * j + 1] = f.y; }
+}
+__device__ __forceinline__ void Store8(float* p, const float* v){
+    ((float4*)p)[0] = make_float4(v[0], v[1], v[2], v[3]);
+    ((float4*)p)[1] = make_float4(v[4], v[5], v[6], v[7]);
+}
+__device__ __forceinline__ void Store8(bf16* p, const float* v){
+    uint4 t;
+    __nv_bfloat162* h = (__nv_bfloat162*)&t;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) h[j] = __floats2bfloat162_rn(v[2 * j], v[2 * j + 1]);
+    *(uint4*)p = t;
+}
+bool Aligned16(std::initializer_list<const void*> ptrs){
+    for (const void* p : ptrs) if ((size_t)p % 16 != 0) return false;
+    return true;
+}
+
+// 每个线程负责一个 2x2 窗口的 8 个通道
+template <typename T>
+__global__ void MaxPool2x2FwdVec(const T* __restrict__ x, T* __restrict__ y, unsigned char* __restrict__ arg,
+                                 int N, int H, int W, int C){
+    const int P = H / 2, Q = W / 2, CV = C / VEC;
+    const size_t total = (size_t)N * P * Q * CV;
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x){
+        int cv = i % CV; size_t t = i / CV; int q = t % Q; t /= Q; int p = t % P; int n = t / P;
+        const T* base = x + (((size_t)n * H + 2 * p) * W + 2 * q) * C + cv * VEC;
+        float v[4][VEC];
+        Load8(base, v[0]); Load8(base + C, v[1]); Load8(base + (size_t)W * C, v[2]); Load8(base + (size_t)W * C + C, v[3]);
+        float best[VEC];
+        unsigned char which[VEC];
+        #pragma unroll
+        for (int j = 0; j < VEC; ++j){
+            best[j] = v[0][j]; which[j] = 0;
+            #pragma unroll
+            for (int k = 1; k < 4; ++k) if (v[k][j] > best[j]){ best[j] = v[k][j]; which[j] = k; }
+        }
+        const size_t o = i * VEC;
+        Store8(y + o, best);
+        *(uint2*)(arg + o) = *(const uint2*)which;
+    }
+}
+
+// 每个线程负责一个窗口的 8 个通道：读一次 dy / argmax，写 4 个位置
+template <typename T>
+__global__ void MaxPool2x2BwdVec(const T* __restrict__ dy, const unsigned char* __restrict__ arg, T* __restrict__ dx,
+                                 int N, int H, int W, int C){
+    const int P = H / 2, Q = W / 2, CV = C / VEC;
+    const size_t total = (size_t)N * P * Q * CV;
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x){
+        int cv = i % CV; size_t t = i / CV; int q = t % Q; t /= Q; int p = t % P; int n = t / P;
+        float g[VEC];
+        Load8(dy + i * VEC, g);
+        uint2 a2 = __ldg((const uint2*)(arg + i * VEC));
+        const unsigned char* a = (const unsigned char*)&a2;
+        T* base = dx + (((size_t)n * H + 2 * p) * W + 2 * q) * C + cv * VEC;
+        #pragma unroll
+        for (int k = 0; k < 4; ++k){
+            float o[VEC];
+            #pragma unroll
+            for (int j = 0; j < VEC; ++j) o[j] = a[j] == k ? g[j] : 0.f;
+            Store8(base + (k >> 1) * (size_t)W * C + (k & 1) * C, o);
+        }
+    }
+}
+
+template <typename T>
+__global__ void AddKernelVec(const T* __restrict__ a, const T* __restrict__ b, T* __restrict__ out, size_t nv){
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nv; i += (size_t)gridDim.x * blockDim.x){
+        float x[VEC], z[VEC];
+        Load8(a + i * VEC, x); Load8(b + i * VEC, z);
+        #pragma unroll
+        for (int j = 0; j < VEC; ++j) x[j] += z[j];
+        Store8(out + i * VEC, x);
     }
 }
 
@@ -272,6 +360,10 @@ void MaxPool2x2Forward(const TinyTensor<T>& x, TinyTensor<T>& y, TinyTensor<unsi
     const int N = x.shape[0], H = x.shape[1], W = x.shape[2], C = x.shape[3];
     y.resize_discard({N, H / 2, W / 2, C});
     argmax.resize_discard({N, H / 2, W / 2, C});
+    if (C % VEC == 0 && H % 2 == 0 && W % 2 == 0 && Aligned16({x.p_data, y.p_data}) && (size_t)argmax.p_data % 8 == 0){
+        MaxPool2x2FwdVec<T><<<Capped(y.size / VEC), 256>>>(x.p_data, y.p_data, argmax.p_data, N, H, W, C);
+        return;
+    }
     MaxPool2x2Fwd<T><<<Capped(y.size), 256>>>(x.p_data, y.p_data, argmax.p_data, N, H, W, C);
 }
 
@@ -281,6 +373,10 @@ void MaxPool2x2Backward(const TinyTensor<T>& dy, const TinyTensor<unsigned char>
     NNCheckGpu(dy, "maxpool_backward");
     const int N = x_shape[0], H = x_shape[1], W = x_shape[2], C = x_shape[3];
     dx.resize_discard(x_shape);
+    if (C % VEC == 0 && H % 2 == 0 && W % 2 == 0 && Aligned16({dy.p_data, dx.p_data}) && (size_t)argmax.p_data % 8 == 0){
+        MaxPool2x2BwdVec<T><<<Capped(dy.size / VEC), 256>>>(dy.p_data, argmax.p_data, dx.p_data, N, H, W, C);
+        return;
+    }
     MaxPool2x2Bwd<T><<<Capped(dx.size), 256>>>(dy.p_data, argmax.p_data, dx.p_data, N, H, W, C);
 }
 
@@ -304,6 +400,10 @@ template <typename T>
 void AddForward(const TinyTensor<T>& a, const TinyTensor<T>& b, TinyTensor<T>& out){
     NNCheckGpu(a, "add"); NNCheck(a.size == b.size, "add: size mismatch");
     out.resize_discard(a.shape);
+    if (a.size % VEC == 0 && Aligned16({a.p_data, b.p_data, out.p_data})){
+        AddKernelVec<T><<<Capped(a.size / VEC), 256>>>(a.p_data, b.p_data, out.p_data, a.size / VEC);
+        return;
+    }
     AddKernel<T><<<Capped(a.size), 256>>>(a.p_data, b.p_data, out.p_data, a.size);
 }
 

@@ -147,6 +147,12 @@ def test_act():
             nn.act_backward(X, to_tt(dy, dtype), dx, act)
             check("act{} fwd".format(act), y.numpy(), yt.detach().numpy(), dtype)
             check("act{} bwd".format(act), dx.numpy(), xt.grad.numpy(), dtype)
+        # 逐元素相加：元素数是 8 的倍数时走向量化 kernel
+        for n in (37, 64):
+            a, b = rounded(rng.standard_normal(n), dtype), rounded(rng.standard_normal(n), dtype)
+            out = empty(dtype)
+            nn.add(to_tt(a, dtype), to_tt(b, dtype), out)
+            check("add n={}".format(n), out.numpy(), a + b, dtype)
 
 
 def test_layernorm():
@@ -171,18 +177,20 @@ def test_layernorm():
 
 def test_pooling():
     for dtype in DTYPES:
-        x = rounded(rng.standard_normal((2, 8, 6, 5)), dtype)
-        xt = tt_t(x)
-        yt = F.max_pool2d(xt.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)
-        dy = rounded(rng.standard_normal(yt.shape), dtype)
-        yt.backward(torch.tensor(dy, dtype=torch.float64))
-        X = to_tt(x, dtype)
-        y, arg = empty(dtype), nn.Tensor_uint8([1], "gpu")
-        nn.maxpool2x2_forward(X, y, arg)
-        check("maxpool fwd", y.numpy(), yt.detach().numpy(), dtype)
-        dx = empty(dtype)
-        nn.maxpool2x2_backward(to_tt(dy, dtype), arg, dx, list(x.shape))
-        check("maxpool bwd", dx.numpy(), xt.grad.numpy(), dtype)
+        # C=5 走标量 kernel，C=16 走向量化 kernel（8 个通道一组）
+        for shape in ((2, 8, 6, 5), (2, 8, 6, 16)):
+            x = rounded(rng.standard_normal(shape), dtype)
+            xt = tt_t(x)
+            yt = F.max_pool2d(xt.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)
+            dy = rounded(rng.standard_normal(yt.shape), dtype)
+            yt.backward(torch.tensor(dy, dtype=torch.float64))
+            X = to_tt(x, dtype)
+            y, arg = empty(dtype), nn.Tensor_uint8([1], "gpu")
+            nn.maxpool2x2_forward(X, y, arg)
+            check("maxpool fwd", y.numpy(), yt.detach().numpy(), dtype)
+            dx = empty(dtype)
+            nn.maxpool2x2_backward(to_tt(dy, dtype), arg, dx, list(x.shape))
+            check("maxpool bwd", dx.numpy(), xt.grad.numpy(), dtype)
 
         xt = tt_t(x)
         yt = xt.mean(dim=(1, 2))
