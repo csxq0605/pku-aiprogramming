@@ -21,6 +21,10 @@ class TorchModel:
         self.arch = arch
         self.device = device
         self.use_graph, self.chunk = use_graph, max(1, chunk)
+        if arch == "mlp":
+            # MLP 一张图录 99 个以上 step 时 graph.replay() 会报 CUDA launch failure（A100 / PyTorch 2.11 实测，
+            # 50 及以下正常，且 chunk 取 1 / 10 / 20 / 50 的速度没有差别），所以限制在 50
+            self.chunk = min(self.chunk, 50)
         self.compile_mode = compile_mode
         self.compiled_step = None
         self.X_all = None

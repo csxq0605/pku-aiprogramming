@@ -1,0 +1,105 @@
+{
+ "dataset": "imagenet64",
+ "arch": "resnet18",
+ "dtype": "bf16",
+ "framework": "PyTorch 2.11.0+cu130 compile(default)",
+ "batch": 128,
+ "optimizer": "sgd",
+ "lr": 0.1,
+ "wd": 5e-05,
+ "graph": false,
+ "chunk": 50,
+ "params": 11681832,
+ "label_smoothing": 0.1,
+ "mixup": true,
+ "cutmix": true,
+ "mix_prob": 1.0,
+ "epochs": 60,
+ "stop_epoch": 10,
+ "history": [
+  {
+   "epoch": 1,
+   "seconds": 135.86877201199968,
+   "train_loss": 6.151075360300729,
+   "train_acc": 0.03832488260565491,
+   "val_loss": 4.6829403125,
+   "val_acc": 0.12976
+  },
+  {
+   "epoch": 2,
+   "seconds": 104.32559482099896,
+   "train_loss": 5.474037819087821,
+   "train_acc": 0.1001910780297732,
+   "val_loss": 4.0404375,
+   "val_acc": 0.22176
+  },
+  {
+   "epoch": 3,
+   "seconds": 103.93654563399468,
+   "train_loss": 5.223813801953242,
+   "train_acc": 0.1322395781296833,
+   "val_loss": 3.71606625,
+   "val_acc": 0.26814
+  },
+  {
+   "epoch": 4,
+   "seconds": 104.38245394099795,
+   "train_loss": 5.087748760490559,
+   "train_acc": 0.15310595464082327,
+   "val_loss": 3.6078184375,
+   "val_acc": 0.29222
+  },
+  {
+   "epoch": 5,
+   "seconds": 104.07056834700052,
+   "train_loss": 5.003121409481467,
+   "train_acc": 0.16372062019182734,
+   "val_loss": 3.552235,
+   "val_acc": 0.29196
+  },
+  {
+   "epoch": 6,
+   "seconds": 103.88342219199694,
+   "train_loss": 4.944692745279249,
+   "train_acc": 0.1730255270256769,
+   "val_loss": 3.35702875,
+   "val_acc": 0.32214
+  },
+  {
+   "epoch": 7,
+   "seconds": 104.27031422699656,
+   "train_loss": 4.916148122939354,
+   "train_acc": 0.1784971650514537,
+   "val_loss": 3.3078075,
+   "val_acc": 0.33756
+  },
+  {
+   "epoch": 8,
+   "seconds": 104.16524452800513,
+   "train_loss": 4.879396824108302,
+   "train_acc": 0.182771443201119,
+   "val_loss": 3.2461625,
+   "val_acc": 0.3448
+  },
+  {
+   "epoch": 9,
+   "seconds": 104.40298937900661,
+   "train_loss": 4.8394370847487265,
+   "train_acc": 0.18725881082026177,
+   "val_loss": 3.4334915625,
+   "val_acc": 0.32732
+  },
+  {
+   "epoch": 10,
+   "seconds": 104.2303267249954,
+   "train_loss": 4.811338545309222,
+   "train_acc": 0.1908017159556399,
+   "val_loss": 3.1964125,
+   "val_acc": 0.35308
+  }
+ ],
+ "train_seconds": 1073.5362318059924,
+ "best_val_acc": 0.35308,
+ "final_val_acc": 0.35308,
+ "peak_mem_mb": 16362
+}
