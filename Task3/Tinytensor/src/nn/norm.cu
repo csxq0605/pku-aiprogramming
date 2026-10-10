@@ -156,7 +156,7 @@ __device__ __forceinline__ void Store8(bf16* p, const float* v){
 }
 
 // ReLU 掩码 y > 0：没有残差时 y = T(max(x * sc + sf, 0))，可以由 x 精确重算（与前向同一算式、同样舍入），
-// 反向就不用再读一遍 y（BN 反向的两个 kernel 各省一份激活的读取）
+// 反向归约就不用再读一遍 y
 template <typename T>
 __device__ __forceinline__ bool BnReluOn(float x, float sc, float sf){
     return ToF(FromF<T>(fmaxf(__fmaf_rn(x, sc, sf), 0.f))) > 0.f;
@@ -261,26 +261,24 @@ __global__ void __launch_bounds__(BN_THREADS) BnApplyVec(const T* __restrict__ x
     }
 }
 
-// 同 BnBackwardApply，按 8 个通道一组处理；RECOMP 同 BnReduceVec（ReLU 掩码由 x 重算，不读 y）
-template <typename T, bool RELU, bool DRES, bool RECOMP = false>
+// 同 BnBackwardApply，按 8 个通道一组处理
+// （这里也由 x 重算 ReLU 掩码的话，A100 上反而变慢：VGG 1.46 -> 1.61 ms、ResNeXt26 2.20 -> 2.86 ms，逐元素的舍入比较压过了少读的 y）
+template <typename T, bool RELU, bool DRES>
 __global__ void __launch_bounds__(BN_THREADS) BnBackwardApplyVec(const T* __restrict__ x, const T* __restrict__ y,
         const T* __restrict__ dy, const float* __restrict__ gamma, const float* __restrict__ stats,
         const float* __restrict__ red, float* __restrict__ dgamma, float* __restrict__ dbeta,
-        T* __restrict__ dx, T* __restrict__ dres, size_t total, int rows, int C, float eps,
-        const float* __restrict__ beta = nullptr){
+        T* __restrict__ dx, T* __restrict__ dres, size_t total, int rows, int C, float eps){
     extern __shared__ float sh[];
-    float* k_g = sh;           // gamma * rstd（= 前向的 scale）
+    float* k_g = sh;           // gamma * rstd
     float* mean_s = sh + C;
     float* rstd_s = sh + 2 * C;
     float* mg = sh + 3 * C;    // sum_g / M
     float* mgx = sh + 4 * C;   // sum_gx / M
-    float* sf_s = sh + 5 * C;  // 前向的 shift（RECOMP）
     for (int c = threadIdx.x; c < C; c += blockDim.x){
         float mean, var;
         BnMeanVar(stats, c, C, rows, mean, var);
         float rstd = rsqrtf(var + eps);
-        if (RECOMP) BnAffine(mean, var, gamma[c], beta[c], eps, k_g[c], sf_s[c]);
-        else k_g[c] = gamma[c] * rstd;
+        k_g[c] = gamma[c] * rstd;
         mean_s[c] = mean;
         rstd_s[c] = rstd;
         mg[c] = red[c] / rows;
@@ -299,12 +297,12 @@ __global__ void __launch_bounds__(BN_THREADS) BnBackwardApplyVec(const T* __rest
     for (; v < nv; v += stride){
         float g[BN_VEC], yy[BN_VEC], xv[BN_VEC];
         Load8(dy + v * BN_VEC, g);
-        if (RELU && !RECOMP) Load8(y + v * BN_VEC, yy);
+        if (RELU) Load8(y + v * BN_VEC, yy);
         Load8(x + v * BN_VEC, xv);
         const int c0 = cv * BN_VEC;
         #pragma unroll
         for (int j = 0; j < BN_VEC; ++j){
-            if (RELU && (RECOMP ? !BnReluOn<T>(xv[j], k_g[c0 + j], sf_s[c0 + j]) : yy[j] <= 0.f)) g[j] = 0.f;
+            if (RELU && yy[j] <= 0.f) g[j] = 0.f;
             const float xhat = (xv[j] - mean_s[c0 + j]) * rstd_s[c0 + j];
             xv[j] = k_g[c0 + j] * (g[j] - mg[c0 + j] - xhat * mgx[c0 + j]);
         }
@@ -494,18 +492,14 @@ void BatchNormBackward(const TinyTensor<T>& x, const TinyTensor<T>& y, const Tin
         dresidual->resize_discard(x.shape);
         dres = dresidual->p_data;
     }
-    const size_t smem = 6 * C * sizeof(float);
+    const size_t smem = 5 * C * sizeof(float);
     if (BnVecOk(C, {x.p_data, y.p_data, dy.p_data, dx.p_data, dres})){
         const int rb = BnReduceBlocks(C, rows), nb = BnApplyBlocks(x.size);
-        // 没有残差的 BN+ReLU（VGG 全部、ResNet 每块的第一个 BN）：掩码由 x 重算，两个 kernel 都不读 y
-        if (relu && !dres && RecomputeMask()){
+        // 没有残差的 BN+ReLU（VGG 全部、ResNet 每块的第一个 BN）：归约时掩码由 x 重算，不读 y（A100：VGG 1.08 -> 0.93 ms）
+        if (relu && !dres && RecomputeMask())
             BnReduceVec<T, true, true, true><<<rb, BN_THREADS>>>(x.p_data, nullptr, dy.p_data, stats.p_data, red.p_data,
                                                                  rows, C, eps, gamma.p_data, beta.p_data);
-            BnBackwardApplyVec<T, true, false, true><<<nb, BN_THREADS, smem>>>(x.p_data, nullptr, dy.p_data, gamma.p_data,
-                stats.p_data, red.p_data, dgamma.p_data, dbeta.p_data, dx.p_data, nullptr, x.size, rows, C, eps, beta.p_data);
-            return;
-        }
-        if (relu) BnReduceVec<T, true, true><<<rb, BN_THREADS>>>(x.p_data, y.p_data, dy.p_data, stats.p_data, red.p_data, rows, C, eps);
+        else if (relu) BnReduceVec<T, true, true><<<rb, BN_THREADS>>>(x.p_data, y.p_data, dy.p_data, stats.p_data, red.p_data, rows, C, eps);
         else      BnReduceVec<T, true, false><<<rb, BN_THREADS>>>(x.p_data, y.p_data, dy.p_data, stats.p_data, red.p_data, rows, C, eps);
 #define APPLY(A, D) BnBackwardApplyVec<T, A, D><<<nb, BN_THREADS, smem>>>(x.p_data, y.p_data, dy.p_data, gamma.p_data,         stats.p_data, red.p_data, dgamma.p_data, dbeta.p_data, dx.p_data, dres, x.size, rows, C, eps)
         if (dres){ if (relu) APPLY(true, true); else APPLY(false, true); }
