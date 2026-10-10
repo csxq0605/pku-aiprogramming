@@ -18,11 +18,26 @@ namespace {
 enum Mode { FWD = 0, DGRAD = 1, WGRAD = 2 };
 constexpr int BK = 32;
 
+// 除以运行时常量 d 的快速除法（乘法 + 移位，n < 2^31）：每个 k tile 的 im2col 下标拆分原本是 4~8 次整数除法，
+// 每次约 20 条指令，比这个 tile 的 MMA 还多
+struct FastDiv{
+    int d = 1, l = 0;
+    unsigned m = 1;
+    FastDiv() = default;
+    explicit FastDiv(int d_) : d(d_){
+        while ((1u << l) < (unsigned)d) ++l;
+        m = (unsigned)(((1ull << 32) * ((1ull << l) - d)) / d + 1);
+    }
+    __device__ __forceinline__ int div(int n) const { return (int)((__umulhi((unsigned)n, m) + (unsigned)n) >> l); }
+};
+
 struct TcArgs{
     ConvGeom g;
     int cg, kg, gm, gn, gk;
     int k_per_split, splits;
     int bpp;             // DGRAD：每个相位的 block 数（gm 是每个相位的像素数）
+    FastDiv fd_cg, fd_s, fd_q, fd_p, fd_tpt;
+    float* ws;           // FWD / DGRAD 用 split-K 时：fp32 部分和（布局同输出），之后再转成 bf16
 };
 
 __device__ __forceinline__ unsigned Smem(const void* p){ return (unsigned)__cvta_generic_to_shared(p); }
@@ -88,7 +103,7 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
     const int k_end = min(p.gk, k_begin + p.k_per_split);
     int ktiles = (k_end - k_begin + BK - 1) / BK;
     // DGRAD：本 block 的相位 (ph_h, ph_w)，有效抽头 r = r0 + i*sh, s = s0 + j*sw
-    int ph_h = 0, ph_w = 0, r0 = 0, s0 = 0, ns = g.s;
+    int ph_h = 0, ph_w = 0, r0 = 0, s0 = 0, ns = g.s, kt_off = 0;
     const int Hp = g.h / g.stride_h, Wp = g.w / g.stride_w;
     if (MODE == DGRAD){
         const int phase = blockIdx.x / p.bpp;
@@ -98,6 +113,12 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
         const int nr = r0 < g.r ? (g.r - r0 + g.stride_h - 1) / g.stride_h : 0;
         ns = s0 < g.s ? (g.s - s0 + g.stride_w - 1) / g.stride_w : 0;
         ktiles = nr * ns * (p.kg / BK);
+        // split-K：本 block 负责第 [kt_off, kt_off + ktiles) 个 tile（各相位的 tile 数不同，按本相位均分）
+        if (p.splits > 1){
+            const int per = (ktiles + p.splits - 1) / p.splits;
+            kt_off = split * per;
+            ktiles = max(0, min(ktiles, kt_off + per) - kt_off);
+        }
     }
 
     // FWD / DGRAD 的 A 每个线程固定负责 A_CHUNKS 行：预先把行号拆成 (n, h, w)。
@@ -140,9 +161,10 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
         const int k0 = k_begin + kt * BK;
         int tap_r = 0, tap_s = 0, tap_c = 0, tap_i = 0, tap_j = 0;
         if (MODE == DGRAD){
-            const int tpt = p.kg / BK, ti = kt / tpt;
-            tap_c = (kt % tpt) * BK;
-            tap_i = ti / ns; tap_j = ti % ns;
+            const int kk = kt + kt_off, ti = p.fd_tpt.div(kk);
+            tap_c = (kk - ti * p.fd_tpt.d) * BK;
+            tap_i = ns == 1 ? ti : ns == 2 ? ti >> 1 : ns == 3 ? ti / 3 : ti / ns;   // ns <= 3 时编译成乘法
+            tap_j = ti - tap_i * ns;
             tap_r = r0 + tap_i * g.stride_h; tap_s = s0 + tap_j * g.stride_w;
         }
         bf16* as = As + stage * BM * BK;
@@ -150,9 +172,9 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
         // ---- A ----
         if (MODE == FWD || MODE == DGRAD){
             // 整个 BK 段落在同一个抽头 (r, s) 内（通道数是 32 的倍数）
-            const int cbase = MODE == FWD ? k0 % p.cg : tap_c;
-            const int rs = k0 / p.cg;
-            const int s = MODE == FWD ? rs % g.s : tap_s, r = MODE == FWD ? rs / g.s : tap_r;
+            const int rs = MODE == FWD ? p.fd_cg.div(k0) : 0, rr = MODE == FWD ? p.fd_s.div(rs) : 0;
+            const int cbase = MODE == FWD ? k0 - rs * p.cg : tap_c;
+            const int s = MODE == FWD ? rs - rr * g.s : tap_s, r = MODE == FWD ? rr : tap_r;
             const int rws = MODE == FWD ? r * g.w + s : -(tap_i * g.q + tap_j);
             #pragma unroll
             for (int i = 0; i < A_CHUNKS; ++i){
@@ -212,7 +234,7 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
                 bool ok = pix < k_end && wb_ok;
                 const bf16* src = b;
                 if (ok){
-                    int ow = pix % g.q; int t = pix / g.q; int oh = t % g.p; int ni = t / g.p;
+                    const int t = p.fd_q.div(pix), ni = p.fd_p.div(t), ow = pix - t * g.q, oh = t - ni * g.p;
                     int ih = oh * g.stride_h + wb_r, iw = ow * g.stride_w + wb_s;
                     ok = ih >= 0 && ih < g.h && iw >= 0 && iw < g.w;
                     if (ok) src = b + (((size_t)ni * g.h + ih) * g.w + iw) * g.c + group * p.cg + wb_c;
@@ -318,7 +340,7 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
     // 直接写的话每行只有 4 个线程 x 4 字节 = 16 字节连续，32 字节的 sector 只用到一半（ncu 提示的写回低效）。
     // A100 上 A/B：VGG 层 fwd 快 7%；其它配置 / DGRAD 反而变慢（多两次 __syncthreads，DGRAD 还会多出寄存器溢出），保持直接写
     constexpr bool STAGED = MODE == FWD && BM == 256;
-    if constexpr (STAGED){
+    if (STAGED && p.splits == 1){
         constexpr int CS = BN + 8;
         static_assert(BM * CS <= STAGES * (BM + BN) * BK, "写回缓冲放不进流水线的共享内存");
         bf16* cs = (bf16*)smem_raw;
@@ -368,6 +390,12 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
                     else{
                         size_t ld = MODE == FWD ? g.k : g.c;
                         int col = (MODE == FWD ? group * p.kg : group * p.cg) + n;
+                        if (p.splits > 1){
+                            float* o = p.ws + row * ld + col;
+                            if (n < p.gn) atomicAdd(o, v0);
+                            if (n + 1 < p.gn) atomicAdd(o + 1, v1);
+                            continue;
+                        }
                         bf16* o = (bf16*)out + row * ld + col;
                         if (n + 1 < p.gn) *(__nv_bfloat162*)o = __floats2bfloat162_rn(v0, v1);
                         else if (n < p.gn) *o = __float2bfloat16(v0);
@@ -378,19 +406,71 @@ __global__ void __launch_bounds__(WGM * WGN * 32, 2) ConvTc(const bf16* __restri
     }
 }
 
+// split-K 的 fp32 部分和 -> bf16 输出（每个线程 4 个元素；元素数是通道数的倍数，必为 4 的倍数）
+__global__ void WsToBf16(const float4* __restrict__ ws, __nv_bfloat162* __restrict__ out, size_t n4){
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n4; i += (size_t)gridDim.x * blockDim.x){
+        const float4 v = ws[i];
+        out[2 * i] = __floats2bfloat162_rn(v.x, v.y);
+        out[2 * i + 1] = __floats2bfloat162_rn(v.z, v.w);
+    }
+}
+
+// FWD / DGRAD 的 split-K 段数。block 数不是 SM 槽位数的整数倍时，最后一个波次只有少数 block 在跑
+// （例如 batch 256 的 ResNet18 第 3 段：256 个 128x128 block，A100 上 216 个槽位，第二波只占 19%）。
+// 估计耗时（单位：一个 k tile）= 波次数 x 每个 block 的 tile 数 + 部分和的额外读写
+// （每个输出元素 s 次 atomicAdd + 清零 + 读回 + 写 bf16，约 (4s + 10) 字节，按 L2 带宽折算成相对 GEMM 的比例）。
+// TT_TC_SPLITK=0 关闭，=N 强制 N 段（对照实验用）
+int ChooseSplits(int blocks, int slots, int ktiles, int gemm_k){
+    static int forced = [](){ const char* e = getenv("TT_TC_SPLITK"); return e ? atoi(e) : -1; }();
+    if (forced >= 0) return std::max(1, std::min(forced, std::max(1, ktiles / 4)));
+    auto waves = [&](long long b){ return (b + slots - 1) / slots; };
+    const double ideal = (double)blocks * ktiles / slots;
+    double best = (double)waves(blocks) * ktiles;
+    int best_s = 1;
+    for (int s = 2; s <= 8 && ktiles / s >= 4; ++s){
+        const double t = (double)waves((long long)blocks * s) * ((ktiles + s - 1) / s) + ideal * (4 * s + 10) * 40.0 / gemm_k;
+        if (t < best * 0.97){ best = t; best_s = s; }
+    }
+    return best_s;
+}
+
 template <int MODE, int BM, int BN, int STAGES, int WGM, int WGN>
 void LaunchTc(const bf16* a, const bf16* b, void* out, TcArgs p){
     const int smem = STAGES * (BM + BN) * BK * (int)sizeof(bf16);
-    static bool configured = false;
-    if (!configured){
+    constexpr int THREADS = WGM * WGN * 32;
+    static int per_sm = 0;
+    if (per_sm == 0){
         cudaFuncSetAttribute(ConvTc<MODE, BM, BN, STAGES, WGM, WGN>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-        configured = true;
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, ConvTc<MODE, BM, BN, STAGES, WGM, WGN>, THREADS, smem);
+        per_sm = std::max(per_sm, 1);
     }
     p.bpp = (p.gm + BM - 1) / BM;
     int gx = p.bpp;
     if (MODE == DGRAD) gx *= p.g.stride_h * p.g.stride_w;
-    dim3 grid(gx, (p.gn + BN - 1) / BN, p.g.groups * p.splits);
-    ConvTc<MODE, BM, BN, STAGES, WGM, WGN><<<grid, WGM * WGN * 32, smem>>>(a, b, out, p);
+    const int gy = (p.gn + BN - 1) / BN;
+    size_t ws_n = 0;
+    if (MODE != WGRAD){
+        const int phases = MODE == DGRAD ? p.g.stride_h * p.g.stride_w : 1;
+        const int ktiles = std::max(1, p.gk / BK / phases);
+        p.splits = ChooseSplits(gx * gy * p.g.groups, per_sm * DeviceSmCount(), ktiles, p.gk / phases);
+        if (MODE == FWD && p.splits > 1){
+            p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;
+            p.splits = (p.gk + p.k_per_split - 1) / p.k_per_split;
+        }
+        if (p.splits > 1){
+            ws_n = MODE == FWD ? (size_t)p.gm * p.g.k : (size_t)p.g.n * p.g.h * p.g.w * p.g.c;
+            p.ws = GpuAlloc<float>(ws_n);
+            cudaMemsetAsync(p.ws, 0, ws_n * sizeof(float));
+        }
+    }
+    dim3 grid(gx, gy, p.g.groups * p.splits);
+    ConvTc<MODE, BM, BN, STAGES, WGM, WGN><<<grid, THREADS, smem>>>(a, b, out, p);
+    if (ws_n){
+        const size_t n4 = ws_n / 4;
+        const int blocks = (int)std::min<size_t>((n4 + 255) / 256, (size_t)DeviceSmCount() * 8);
+        WsToBf16<<<blocks, 256>>>((const float4*)p.ws, (__nv_bfloat162*)out, n4);
+        GpuFree(p.ws, ws_n);
+    }
 }
 
 TcArgs MakeTcArgs(const ConvGeom& g, int mode){
@@ -404,6 +484,9 @@ TcArgs MakeTcArgs(const ConvGeom& g, int mode){
     p.splits = 1;
     p.k_per_split = p.gk;
     p.bpp = 1;
+    p.ws = nullptr;
+    p.fd_cg = FastDiv(p.cg); p.fd_s = FastDiv(g.s); p.fd_q = FastDiv(g.q); p.fd_p = FastDiv(g.p);
+    p.fd_tpt = FastDiv(std::max(1, p.kg / BK));
     return p;
 }
 

@@ -1,6 +1,7 @@
 """
 卷积微基准：TinyTensor（myNN）与 PyTorch（cuDNN）在 ResNet / ResNeXt 典型层上的前向、输入梯度、权重梯度耗时
-用法: python bench_conv.py [--dtype bf16] [--simt]（--simt：bf16 也强制走 SIMT 版本，对照 tensor core 的收益）
+用法: python bench_conv.py [--dtype bf16] [--batch 128] [--simt]（--simt：bf16 也强制走 SIMT 版本，对照 tensor core 的收益）
+每层同时检查 TinyTensor 的前向 / 输入梯度与 PyTorch 的相对误差（err 列，取两者中较大的）
 """
 import os
 import sys
@@ -21,7 +22,7 @@ torch.backends.cudnn.allow_tf32 = False
 torch.backends.cuda.matmul.allow_tf32 = False
 
 DTYPE = "bf16" if "--dtype" in sys.argv and sys.argv[sys.argv.index("--dtype") + 1] == "bf16" else "fp32"
-B = 128
+B = int(sys.argv[sys.argv.index("--batch") + 1]) if "--batch" in sys.argv else 128
 LAYERS = [  # (名字, H, C, K, R, stride, groups)
     ("stem 3->64", 64, 3, 64, 3, 1, 1),
     ("r18 l1 64", 32, 64, 64, 3, 1, 1),
@@ -34,6 +35,8 @@ LAYERS = [  # (名字, H, C, K, R, stride, groups)
     ("g32 128 (4/g)", 32, 128, 128, 3, 1, 32),
     ("g32 512 (16/g)", 8, 512, 512, 3, 1, 32),
     ("vgg 64 @64", 64, 64, 64, 3, 1, 1),
+    ("vgg 128 @32", 32, 128, 128, 3, 1, 1),
+    ("vgg 512 @8", 8, 512, 512, 3, 1, 1),
 ]
 if "--only" in sys.argv:
     ONLY = sys.argv[sys.argv.index("--only") + 1]
@@ -93,8 +96,15 @@ def main():
         p_w = timeit(lambda: conv(dyt, xt, wt, None, (s, s), (pad, pad), (1, 1), False, (0, 0), g,
                                   (False, True, False)), csync)
         tot += [t_f, p_f, t_d, p_d, t_w, p_w]
-        print("{:16s} {:8.2f} | {:9.3f} / {:9.3f} | {:9.3f} / {:9.3f} | {:9.3f} / {:9.3f}".format(
-            name, flop, t_f, p_f, t_d, p_d, t_w, p_w))
+        # 正确性：与 PyTorch 的输出 / 输入梯度比较（相对误差 = 最大绝对误差 / 参考值的最大绝对值）
+        def rel(got, want):
+            want = want.float().cpu().numpy()
+            return float(np.abs(got - want).max() / (np.abs(want).max() + 1e-12))
+        ref_y = F.conv2d(xt, wt, None, s, pad, 1, g).permute(0, 2, 3, 1)
+        ref_dx = conv(dyt, xt, wt, None, (s, s), (pad, pad), (1, 1), False, (0, 0), g, (True, False, False))[0]
+        err = max(rel(y.numpy().reshape(ref_y.shape), ref_y), rel(dx.numpy().reshape(B, H, H, C), ref_dx.permute(0, 2, 3, 1)))
+        print("{:16s} {:8.2f} | {:9.3f} / {:9.3f} | {:9.3f} / {:9.3f} | {:9.3f} / {:9.3f} | err {:.1e}".format(
+            name, flop, t_f, p_f, t_d, p_d, t_w, p_w, err))
     print("{:16s} {:8s} | {:9.3f} / {:9.3f} | {:9.3f} / {:9.3f} | {:9.3f} / {:9.3f}".format("total", "", *tot))
 
 
