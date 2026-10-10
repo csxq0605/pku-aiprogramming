@@ -79,7 +79,7 @@ template <int MODE> struct Layout{ static constexpr bool A_RK = MODE != WGRAD; s
 // block tile BM x BN，WGM x WGN 个 warp，每个 warp 负责 (BM/WGM) x (BN/WGN)。
 // 配置见 Dispatch：RTX 40 系列用 8 个 warp 的 128x128 / 128x64；A100 这类共享内存大的卡用 4 个 warp、每个 warp 64x64 的大 tile
 // （和 cuDNN 在 A100 上选的 256x64 / 128x128 一致：每个 k16 步 MMA 与 ldmatrix 之比更高）
-// 每个 SM 同时驻留的 block 数：8 个 warp 的 256x128 / 128x256 大 tile（每个 warp 64x64）每个 SM 只放 1 个，
+// 每个 SM 同时驻留的 block 数：8 个 warp 的 256x128 大 tile（每个 warp 64x64，只用于 FWD）每个 SM 只放 1 个，
 // 换来每线程 255 个寄存器（fragment 双缓冲）；其余配置 2 个
 template <int BM, int BN, int THREADS> struct TcMinBlocks{ static constexpr int value = BM * BN >= 256 * 128 && THREADS >= 256 ? 1 : 2; };
 
@@ -550,25 +550,13 @@ void Dispatch(const bf16* a, const bf16* b, void* out, TcArgs p){
         p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;
         p.splits = (p.gk + p.k_per_split - 1) / p.k_per_split;
     }
-    // 8 个 warp、每个 warp 64x64 的大 tile：block 数至少 4 个波次（每个 SM 1 个）才用，否则尾波浪费抵掉收益。
-    // TT_TC_HUGE=0 关闭（对照实验用）
+    // FWD：8 个 warp、每个 warp 64x64 的 256x128 大 tile，block 数至少 4 个波次（每个 SM 1 个）才用，否则尾波浪费抵掉收益。
+    // A100 batch 256 实测：VGG 128@32 fwd 0.63 -> 0.53 ms，1x1 层快 15~30%；同样的 tile 用在 DGRAD 上持平或更慢，
+    // WGRAD 的 128x256 明显更慢（VGG 128@32 0.56 -> 0.91 ms），所以只用于 FWD。TT_TC_HUGE=0 关闭（对照实验用）
     static const bool huge_ok = [](){ const char* e = getenv("TT_TC_HUGE"); return !(e && atoi(e) == 0); }() && Stages() == 4;
-    if (huge_ok){
-        const int sms = DeviceSmCount();
-        if (MODE == WGRAD && p.gm >= 128 && p.gn >= 256){
-            const int tiles = ((p.gm + 127) / 128) * ((p.gn + 255) / 256) * p.g.groups;
-            const int want = std::max(1, 3 * sms / 2 / tiles), max_splits = std::max(1, p.gk / (BK * 8));
-            p.splits = std::min(want, max_splits);
-            p.k_per_split = ((p.gk + p.splits - 1) / p.splits + BK - 1) / BK * BK;
-            p.splits = (p.gk + p.k_per_split - 1) / p.k_per_split;
-            LaunchTc<MODE, 128, 256, 4, 2, 4>(a, b, out, p);
-            return;
-        }
-        if (MODE != WGRAD && p.gn >= 128){
-            const int phases = MODE == DGRAD ? p.g.stride_h * p.g.stride_w : 1;
-            const long long blocks = (long long)((p.gm + 255) / 256) * phases * ((p.gn + 127) / 128) * p.g.groups;
-            if (blocks >= 4LL * sms){ LaunchTc<MODE, 256, 128, 4, 4, 2>(a, b, out, p); return; }
-        }
+    if (MODE == FWD && huge_ok && p.gn >= 128){
+        const long long blocks = (long long)((p.gm + 255) / 256) * ((p.gn + 127) / 128) * p.g.groups;
+        if (blocks >= 4LL * DeviceSmCount()){ LaunchTc<MODE, 256, 128, 4, 4, 2>(a, b, out, p); return; }
     }
     const int big = BigTiles();
     if (big){
