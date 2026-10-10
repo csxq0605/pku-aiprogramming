@@ -211,9 +211,13 @@ __global__ void SelectBwd(const T* __restrict__ dy, T* __restrict__ dx, int B, i
 }
 
 // ---------- softmax 交叉熵：一个 warp 处理一行 ----------
+// 软标签（训练时的正则化，都可以关）：target = (1 - eps) * (lam * onehot(y) + (1 - lam) * onehot(y2)) + eps / C
+//   eps：label smoothing；y2 / lam：Mixup / CutMix 的另一个样本的标签与混合比例（lam 是 GPU 上的标量，由 load_batch 写）
+// loss = logsumexp(z) - sum_i target_i * z_i，grad = softmax - target；准确率按主标签 y 统计
 __global__ void SoftmaxCE(const float* __restrict__ logits, const int* __restrict__ labels, float* __restrict__ grad,
                           float grad_scale, float* __restrict__ loss_sum, int* __restrict__ correct,
-                          int N, int C, bool want_grad){
+                          int N, int C, bool want_grad, const int* __restrict__ labels2 = nullptr,
+                          const float* __restrict__ lam_ptr = nullptr, float eps = 0.f){
     const int row = (blockIdx.x * blockDim.x + threadIdx.x) / 32, lane = threadIdx.x % 32;
     if (row >= N) return;
     const float* z = logits + (size_t)row * C;
@@ -230,54 +234,119 @@ __global__ void SoftmaxCE(const float* __restrict__ logits, const int* __restric
     #pragma unroll
     for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffff, s, o);
     const int y = labels[row];
+    const float lam = lam_ptr ? *lam_ptr : 1.f;
+    const int y2 = labels2 ? labels2[row] : y;
+    const float w1 = (1.f - eps) * lam, w2 = (1.f - eps) * (1.f - lam), wu = eps / C;
     if (want_grad){
         const float inv = 1.f / s;
-        for (int i = lane; i < C; i += 32)
-            grad[(size_t)row * C + i] = (__expf(z[i] - mx) * inv - (i == y ? 1.f : 0.f)) * grad_scale;
+        for (int i = lane; i < C; i += 32){
+            const float t = (i == y ? w1 : 0.f) + (i == y2 ? w2 : 0.f) + wu;
+            grad[(size_t)row * C + i] = (__expf(z[i] - mx) * inv - t) * grad_scale;
+        }
+    }
+    float zsum = 0.f;
+    if (eps != 0.f){
+        for (int i = lane; i < C; i += 32) zsum += z[i];
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) zsum += __shfl_xor_sync(0xffffffff, zsum, o);
     }
     if (lane == 0){
-        atomicAdd(loss_sum, logf(s) + mx - z[y]);
+        const float lse = logf(s) + mx;
+        atomicAdd(loss_sum, lse - w1 * z[y] - w2 * z[y2] - wu * zsum);
         if (arg == y) atomicAdd(correct, 1);
     }
 }
 
 // ---------- 数据增强 ----------
-__device__ __forceinline__ unsigned int Hash(unsigned int x){
-    // lowbias32（Chris Wellons），PyTorch 对照实现里用完全相同的整数运算
+struct Norm3{ float mean[3]; float inv_std[3]; };
+
+// Mixup / CutMix（每个 step 一组参数，由 hash(seed, 全局步数) 决定；PyTorch 对照实现用完全相同的整数运算）：
+//   以 p16 / 65536 的概率混合；两者都开时各一半。第 b 个样本与第 B-1-b 个样本（各自做自己的裁剪翻转）混合
+//   Mixup：x = lam * x_b + (1 - lam) * x_{B-1-b}，lam ~ U(0,1)
+//   CutMix：边长 s = isqrt(floor(u * H * W)) 的方框（中心均匀，超出图像的部分截掉）内取另一个样本，lam = 1 - 框面积 / (H*W)
+struct MixCfg{ int p16; bool mixup, cutmix; };
+struct MixStep{ int mode, y0, y1, x0, x1; float lam; };     // mode 0 不混合，1 Mixup，2 CutMix
+
+// lowbias32（Chris Wellons），PyTorch 对照实现里用完全相同的整数运算
+__host__ __device__ __forceinline__ unsigned int HashHD(unsigned int x){
     x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
     return x;
 }
 
-struct Norm3{ float mean[3]; float inv_std[3]; };
+__device__ __forceinline__ MixStep MixParams(const MixCfg& m, unsigned int seed, unsigned int t, int H, int W){
+    MixStep r{0, 0, 0, 0, 0, 1.f};
+    if (!m.mixup && !m.cutmix) return r;
+    const unsigned int h0 = HashHD(seed ^ HashHD(t * 0x85EBCA6BU + 0x632BE5ABU));
+    if ((int)(h0 & 0xFFFFu) >= m.p16) return r;
+    const bool cut = m.mixup && m.cutmix ? ((h0 >> 16) & 1u) : m.cutmix;
+    const unsigned int h1 = HashHD(h0 ^ 0x27D4EB2FU), h2 = HashHD(h1 ^ 0x165667B1U);
+    const unsigned int u24 = h1 >> 8;
+    if (!cut){
+        r.mode = 1;
+        r.lam = (float)u24 * (1.f / 16777216.f);
+        return r;
+    }
+    const long long target = ((long long)u24 * (H * W)) >> 24;
+    long long s = (long long)sqrt((double)target);
+    while (s * s > target) --s;
+    while ((s + 1) * (s + 1) <= target) ++s;
+    const int cy = (int)(h2 % (unsigned int)H), cx = (int)((h2 >> 16) % (unsigned int)W);
+    r.mode = 2;
+    r.y0 = max(cy - (int)s / 2, 0); r.y1 = min(cy - (int)s / 2 + (int)s, H);
+    r.x0 = max(cx - (int)s / 2, 0); r.x1 = min(cx - (int)s / 2 + (int)s, W);
+    r.lam = 1.f - __fdiv_rn((float)((r.y1 - r.y0) * (r.x1 - r.x0)), (float)(H * W));
+    return r;
+}
+
+// 第 b 个样本经过裁剪翻转后 (h, w, c) 处的值（归一化前，[0,1]）
+__device__ __forceinline__ float AugPixel(const unsigned char* __restrict__ images, int idx, int b, int h, int w, int c,
+                                          int H, int W, bool augment, int pad, unsigned int seed, unsigned int t){
+    int sh = h, sw = w;
+    if (augment){
+        unsigned int rnd = HashHD(seed ^ HashHD(t * 0x9E3779B9U + (unsigned int)b));
+        int range = 2 * pad + 1;
+        int dy = (int)(rnd % range) - pad;
+        int dx = (int)((rnd >> 8) % range) - pad;
+        bool flip = (rnd >> 16) & 1;
+        sh = h + dy;
+        sw = (flip ? W - 1 - w : w) + dx;
+    }
+    if (sh >= 0 && sh < H && sw >= 0 && sw < W) return images[(((size_t)idx * H + sh) * W + sw) * 3 + c] * (1.f / 255.f);
+    return 0.f;
+}
 
 // 一个线程写一个输出元素；最后一个完成的 block 推进步数（与 MNIST 的 gather_xy 相同的做法）
 template <typename T>
 __global__ void LoadBatchKernel(const unsigned char* __restrict__ images, const int* __restrict__ labels,
                                 const int* __restrict__ order, int* __restrict__ step, T* __restrict__ x,
                                 int* __restrict__ y, int batch, int H, int W, Norm3 norm, bool augment, int pad,
-                                unsigned int seed){
+                                unsigned int seed, MixCfg mix = MixCfg{0, false, false}, int* __restrict__ y2 = nullptr,
+                                float* __restrict__ lam_out = nullptr){
     const int base = step[0] * batch;
     const unsigned int t = (unsigned int)step[2];
+    const MixStep ms = MixParams(mix, seed, t, H, W);
     const size_t total = (size_t)batch * H * W * 3;
     for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x){
         int c = i % 3; size_t r = i / 3; int w = r % W; r /= W; int h = r % H; int b = r / H;
-        int idx = order[base + b];
-        int sh = h, sw = w;
-        if (augment){
-            unsigned int rnd = Hash(seed ^ Hash(t * 0x9E3779B9U + (unsigned int)b));
-            int range = 2 * pad + 1;
-            int dy = (int)(rnd % range) - pad;
-            int dx = (int)((rnd >> 8) % range) - pad;
-            bool flip = (rnd >> 16) & 1;
-            sh = h + dy;
-            sw = (flip ? W - 1 - w : w) + dx;
+        const int b2 = batch - 1 - b;
+        float v;
+        if (ms.mode == 2 && h >= ms.y0 && h < ms.y1 && w >= ms.x0 && w < ms.x1)
+            v = AugPixel(images, order[base + b2], b2, h, w, c, H, W, augment, pad, seed, t);
+        else
+            v = AugPixel(images, order[base + b], b, h, w, c, H, W, augment, pad, seed, t);
+        float xn = __fmul_rn(v - norm.mean[c], norm.inv_std[c]);
+        if (ms.mode == 1){
+            const float v2 = AugPixel(images, order[base + b2], b2, h, w, c, H, W, augment, pad, seed, t);
+            const float x2 = __fmul_rn(v2 - norm.mean[c], norm.inv_std[c]);
+            xn = __fadd_rn(__fmul_rn(ms.lam, xn), __fmul_rn(1.f - ms.lam, x2));
         }
-        float v = 0.f;
-        if (sh >= 0 && sh < H && sw >= 0 && sw < W) v = images[(((size_t)idx * H + sh) * W + sw) * 3 + c] * (1.f / 255.f);
-        x[i] = FromF<T>((v - norm.mean[c]) * norm.inv_std[c]);
+        x[i] = FromF<T>(xn);
     }
-    for (int b = blockIdx.x * blockDim.x + threadIdx.x; b < batch; b += gridDim.x * blockDim.x)
+    for (int b = blockIdx.x * blockDim.x + threadIdx.x; b < batch; b += gridDim.x * blockDim.x){
         y[b] = labels[order[base + b]];
+        if (y2) y2[b] = labels[order[base + batch - 1 - b]];
+    }
+    if (lam_out && blockIdx.x == 0 && threadIdx.x == 0) *lam_out = ms.lam;
     __syncthreads();
     if (threadIdx.x == 0){
         __threadfence();
@@ -469,6 +538,19 @@ void SoftmaxCrossEntropyForwardBackward(const TinyTensor<float>& logits, const T
                                              loss_sum.p_data, correct.p_data, N, C, want_grad);
 }
 
+void SoftmaxCrossEntropyMix(const TinyTensor<float>& logits, const TinyTensor<int>& labels,
+                            const TinyTensor<int>& labels2, const TinyTensor<float>& lam, float eps,
+                            TinyTensor<float>& grad, float grad_scale,
+                            TinyTensor<float>& loss_sum, TinyTensor<int>& correct){
+    NNCheck(logits.shape.size() == 2, "softmax_ce_mix: logits [N, C]");
+    const int N = logits.shape[0], C = logits.shape[1];
+    NNCheck(labels.size == (size_t)N && labels2.size == (size_t)N && lam.size >= 1, "softmax_ce_mix: labels / lam");
+    grad.resize_discard(logits.shape);
+    SoftmaxCE<<<(N * 32 + 255) / 256, 256>>>(logits.p_data, labels.p_data, grad.p_data, grad_scale,
+                                             loss_sum.p_data, correct.p_data, N, C, true, labels2.p_data,
+                                             lam.p_data, eps);
+}
+
 template <typename T>
 void LoadBatch(const TinyTensor<unsigned char>& images, const TinyTensor<int>& labels, const TinyTensor<int>& order,
                TinyTensor<int>& step, TinyTensor<T>& x, TinyTensor<int>& y, int batch,
@@ -483,6 +565,25 @@ void LoadBatch(const TinyTensor<unsigned char>& images, const TinyTensor<int>& l
     for (int c = 0; c < 3; ++c){ norm.mean[c] = mean[c]; norm.inv_std[c] = 1.f / std[c]; }
     LoadBatchKernel<T><<<Capped(x.size), 256>>>(images.p_data, labels.p_data, order.p_data, step.p_data, x.p_data,
                                                 y.p_data, batch, H, W, norm, augment, pad, seed);
+}
+
+template <typename T>
+void LoadBatchMix(const TinyTensor<unsigned char>& images, const TinyTensor<int>& labels, const TinyTensor<int>& order,
+                  TinyTensor<int>& step, TinyTensor<T>& x, TinyTensor<int>& y, TinyTensor<int>& y2,
+                  TinyTensor<float>& lam, int batch, const std::vector<float>& mean, const std::vector<float>& std,
+                  int pad, unsigned int seed, float mix_prob, bool mixup, bool cutmix){
+    NNCheck(images.shape.size() == 4 && images.shape[3] == 3, "load_batch_mix: images [N, H, W, 3] uint8");
+    NNCheck(step.size >= 4, "load_batch_mix: step needs 4 ints");
+    NNCheck(mean.size() == 3 && std.size() == 3, "load_batch_mix: mean/std");
+    const int H = images.shape[1], W = images.shape[2];
+    NNCheck(x.shape == std::vector<int>({batch, H, W, 3}) && y.size == (size_t)batch && y2.size == (size_t)batch &&
+            lam.size >= 1, "load_batch_mix: output shape");
+    Norm3 norm;
+    for (int c = 0; c < 3; ++c){ norm.mean[c] = mean[c]; norm.inv_std[c] = 1.f / std[c]; }
+    MixCfg mix{(int)lroundf(mix_prob * 65536.f), mixup, cutmix};
+    LoadBatchKernel<T><<<Capped(x.size), 256>>>(images.p_data, labels.p_data, order.p_data, step.p_data, x.p_data,
+                                                y.p_data, batch, H, W, norm, true, pad, seed, mix, y2.p_data,
+                                                lam.p_data);
 }
 
 void SgdMomentumStep(TinyTensor<float>& w, const TinyTensor<float>& g, TinyTensor<float>& m, TinyTensor<bf16>* w_lowp,
@@ -513,7 +614,11 @@ void AdamWStep(TinyTensor<float>& w, const TinyTensor<float>& g, TinyTensor<floa
     template void SelectTokenBackward<T>(const TinyTensor<T>&, TinyTensor<T>&, const std::vector<int>&); \
     template void LoadBatch<T>(const TinyTensor<unsigned char>&, const TinyTensor<int>&, const TinyTensor<int>&, \
                                TinyTensor<int>&, TinyTensor<T>&, TinyTensor<int>&, int, const std::vector<float>&, \
-                               const std::vector<float>&, bool, int, unsigned int);
+                               const std::vector<float>&, bool, int, unsigned int); \
+    template void LoadBatchMix<T>(const TinyTensor<unsigned char>&, const TinyTensor<int>&, const TinyTensor<int>&, \
+                                  TinyTensor<int>&, TinyTensor<T>&, TinyTensor<int>&, TinyTensor<int>&, TinyTensor<float>&, \
+                                  int, const std::vector<float>&, const std::vector<float>&, int, unsigned int, float, \
+                                  bool, bool);
 INSTANTIATE(float)
 INSTANTIATE(bf16)
 template void CastTensor<float, bf16>(const TinyTensor<float>&, TinyTensor<bf16>&);

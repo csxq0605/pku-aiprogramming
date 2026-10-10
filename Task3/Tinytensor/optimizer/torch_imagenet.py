@@ -165,8 +165,34 @@ def hash32(x):
     return x ^ (x >> 16)
 
 
+def isqrt_floor(t):
+    """非负整数张量的 floor(sqrt)，与 misc.cu 相同：double sqrt 后再修正一次"""
+    s = torch.sqrt(t.double()).floor().long()
+    s = s - (s * s > t).long()
+    return s + ((s + 1) * (s + 1) <= t).long()
+
+
+def mix_params(seed, gstep, H, W, p16, mixup, cutmix):
+    """与 misc.cu 的 MixParams 完全相同：返回 (mode, lam, y0, y1, x0, x1)，都是 GPU 上的标量张量"""
+    h0 = hash32(seed ^ hash32((gstep * 0x85EBCA6B + 0x632BE5AB) & M32))
+    apply = (h0 & 0xFFFF) < p16
+    cut = ((h0 >> 16) & 1).bool() if (mixup and cutmix) else torch.full_like(apply, cutmix)
+    h1 = hash32(h0 ^ 0x27D4EB2F)
+    h2 = hash32(h1 ^ 0x165667B1)
+    u24 = h1 >> 8
+    lam_mix = u24.float() * (1.0 / 16777216.0)
+    s = isqrt_floor((u24 * (H * W)) >> 24)
+    cy, cx = h2 % H, (h2 >> 16) % W
+    y0, x0 = (cy - s // 2).clamp(min=0), (cx - s // 2).clamp(min=0)
+    y1, x1 = (cy - s // 2 + s).clamp(max=H), (cx - s // 2 + s).clamp(max=W)
+    lam_cut = 1.0 - ((y1 - y0) * (x1 - x0)).float() / float(H * W)
+    mode = torch.where(apply, torch.where(cut, 2, 1), 0)
+    lam = torch.where(mode == 1, lam_mix, torch.where(mode == 2, lam_cut, torch.ones_like(lam_mix)))
+    return mode, lam, y0, y1, x0, x1
+
+
 class GpuData:
-    def __init__(self, images, labels, batch, dtype, channels_last, augment, seed):
+    def __init__(self, images, labels, batch, dtype, channels_last, augment, seed, mix=(0.0, False, False)):
         self.images = images                    # [N, H, W, 3] uint8 (cuda)
         self.labels = labels.long()
         N, H, W, _ = images.shape
@@ -178,6 +204,8 @@ class GpuData:
         self.mean = torch.tensor(C.MEAN, device=dev).view(1, 1, 1, 3)
         self.inv_std = 1.0 / torch.tensor(C.STD, device=dev).view(1, 1, 1, 3)
         self.dtype, self.channels_last = dtype, channels_last
+        self.p16 = int(round(mix[0] * 65536))
+        self.mixup, self.cutmix = mix[1], mix[2]
 
     def get(self, order, bstep, gstep):
         """bstep：本 epoch 的 batch 序号；gstep：全局步数（决定增强的随机数）。都是 GPU 上的 long 标量"""
@@ -198,10 +226,20 @@ class GpuData:
         flat = (idx.view(B, 1, 1) * H + sh.clamp(0, H - 1)) * W + sw.clamp(0, W - 1)
         x = self.images.view(-1, 3).index_select(0, flat.reshape(-1)).view(B, H, W, 3)
         x = torch.where(valid.unsqueeze(-1), x.float() * (1.0 / 255.0), 0.0)
-        x = ((x - self.mean) * self.inv_std).permute(0, 3, 1, 2)     # NHWC 内存 = channels_last
+        x = (x - self.mean) * self.inv_std
+        y = self.labels.index_select(0, idx)
+        lam = None
+        if self.augment and (self.mixup or self.cutmix):
+            # 第 b 个样本与第 B-1-b 个样本（各自已做裁剪翻转）混合
+            mode, lam, y0, y1, x0, x1 = mix_params(self.seed, gstep, H, W, self.p16, self.mixup, self.cutmix)
+            x2 = x.flip(0)
+            mixed = lam * x + (1 - lam) * x2
+            box = ((self.hh >= y0) & (self.hh < y1)) & ((self.ww >= x0) & (self.ww < x1))   # [1, H, W]
+            x = torch.where(mode == 1, mixed, torch.where((mode == 2) & box.unsqueeze(-1), x2, x))
+        x = x.permute(0, 3, 1, 2)     # NHWC 内存 = channels_last
         if not self.channels_last:
             x = x.contiguous()
-        return x, self.labels.index_select(0, idx)
+        return x, y, lam
 
 
 class TorchTrainer:
@@ -217,7 +255,7 @@ class TorchTrainer:
         cl = args.memory_format == "channels_last" or (args.memory_format == "auto" and args.dtype == "bf16")
         self.channels_last = cl
         self.train_data = GpuData(torch.from_numpy(tx).to(dev), torch.from_numpy(ty).to(dev), args.batch,
-                                  args.dtype, cl, True, C.aug_seed(args.seed))
+                                  args.dtype, cl, True, C.aug_seed(args.seed), C.mix_cfg(args))
         self.val_data = GpuData(torch.from_numpy(vx).to(dev), torch.from_numpy(vy).to(dev), C.EVAL_BATCH,
                                 args.dtype, cl, False, 0)
         self.model = build(args.arch, C.NUM_CLASSES).to(dev)
@@ -256,18 +294,24 @@ class TorchTrainer:
         cos = s["base_lr"] * (s["final_ratio"] + (1 - s["final_ratio"]) * 0.5 * (1 + torch.cos(math.pi * p)))
         return torch.where(t < s["warmup_steps"], warm, cos)
 
-    def _forward_backward(self, x, y):
+    def _forward_backward(self, x, y, lam=None):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.args.dtype == "bf16"):
             logits = self.model(x)
-        loss = F.cross_entropy(logits.float(), y)
+        ls = self.args.label_smoothing
+        if lam is None:
+            loss = F.cross_entropy(logits.float(), y, label_smoothing=ls)
+        else:
+            # 软标签 lam * onehot(y) + (1 - lam) * onehot(y2)（再做 label smoothing）的交叉熵，对目标是线性的
+            loss = lam * F.cross_entropy(logits.float(), y, label_smoothing=ls) + \
+                (1 - lam) * F.cross_entropy(logits.float(), y.flip(0), label_smoothing=ls)
         loss.backward()
         return loss.detach(), logits.detach()
 
     def _step(self):
-        x, y = self.train_data.get(self.order, self.bstep, self.gstep)
+        x, y, lam = self.train_data.get(self.order, self.bstep, self.gstep)
         self.bstep += 1
         self.gstep += 1
-        loss, logits = self._forward_backward(x, y)
+        loss, logits = self._forward_backward(x, y, lam)
         self.lr.copy_(self._lr_at(self.gstep - 1))
         self.opt.step()
         self.opt.zero_grad(set_to_none=False)
@@ -318,7 +362,7 @@ class TorchTrainer:
         loss, correct = torch.zeros((), device="cuda"), torch.zeros((), dtype=torch.long, device="cuda")
         zero = torch.zeros((), dtype=torch.long, device="cuda")
         for i in range(self.n_val // C.EVAL_BATCH):
-            x, y = self.val_data.get(order, zero + i, zero)
+            x, y, _ = self.val_data.get(order, zero + i, zero)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.args.dtype == "bf16"):
                 logits = self.model(x).float()
             loss += F.cross_entropy(logits, y, reduction="sum")

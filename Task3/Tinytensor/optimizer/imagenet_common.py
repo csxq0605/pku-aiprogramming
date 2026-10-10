@@ -54,6 +54,11 @@ def parse_args(extra=None):
     p.add_argument("--train-limit", type=int, default=0, help="只用前 N 张训练图（调试用）")
     p.add_argument("--no-fuse", dest="fuse", action="store_false",
                    help="TinyTensor 不用融合算子：BN、残差相加、ReLU / GELU 各自一个 kernel（消融实验）")
+    # 正则化（两个框架完全相同的实现，见 misc.cu 的 MixParams / SoftmaxCE 与 torch_imagenet.py 的 GpuData）
+    p.add_argument("--label-smoothing", type=float, default=0.0)
+    p.add_argument("--mixup", action="store_true", help="Mixup，lam ~ U(0,1)")
+    p.add_argument("--cutmix", action="store_true", help="CutMix，框面积 ~ U(0,1)；与 --mixup 同时开时每步各一半概率")
+    p.add_argument("--mix-prob", type=float, default=1.0, help="每个 step 做 Mixup / CutMix 的概率")
     p.add_argument("--tag", default="")
     if extra:
         extra(p)
@@ -65,7 +70,16 @@ def parse_args(extra=None):
     args.wd = d["wd"] if args.wd is None else args.wd
     if args.warmup_epochs is None:
         args.warmup_epochs = 1.0 if args.optimizer == "sgd" else min(5.0, args.epochs / 5)
+    args.regularize = args.label_smoothing > 0 or args.mixup or args.cutmix
+    if args.regularize and not args.tag:
+        args.tag = "reg"
     return args
+
+
+def mix_cfg(args):
+    """(mix_prob, mixup, cutmix)；不做 Mixup / CutMix 时概率记为 0"""
+    on = args.mixup or args.cutmix
+    return (args.mix_prob if on else 0.0), args.mixup, args.cutmix
 
 
 def use_dataset(name):
@@ -124,7 +138,8 @@ def run(trainer, args, framework):
     name = "{}{}_{}_{}{}".format(prefix(), args.arch, args.dtype, framework["key"], ("_" + args.tag) if args.tag else "")
     record = dict(dataset=DATASET, arch=args.arch, dtype=args.dtype, framework=framework["name"], batch=args.batch,
                   optimizer=args.optimizer, lr=args.lr, wd=args.wd, graph=args.graph, chunk=args.chunk,
-                  params=trainer.num_params)
+                  params=trainer.num_params, label_smoothing=args.label_smoothing, mixup=args.mixup,
+                  cutmix=args.cutmix, mix_prob=mix_cfg(args)[0])
 
     if args.bench:
         # 吞吐测试：先跑 warmup 个 step（包括第一个 eager step、CUDA Graph 录制或 torch.compile 编译），再计时。

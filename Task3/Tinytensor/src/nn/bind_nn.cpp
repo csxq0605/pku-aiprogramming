@@ -30,6 +30,7 @@ void BindOps(py::module& m){
     m.def("act_forward", &ActForward<T>);
     m.def("act_backward", &ActBackward<T>);
     m.def("load_batch", &LoadBatch<T>);
+    m.def("load_batch_mix", &LoadBatchMix<T>);
 }
 
 PYBIND11_MODULE(myNN, m){
@@ -79,6 +80,7 @@ PYBIND11_MODULE(myNN, m){
     m.def("linear_backward", &LinearBackward<bf16, float>);
 
     m.def("softmax_ce", &SoftmaxCrossEntropyForwardBackward);
+    m.def("softmax_ce_mix", &SoftmaxCrossEntropyMix);
 
     py::class_<LrSchedule>(m, "LrSchedule")
         .def(py::init([](float base_lr, int warmup_steps, int total_steps, float final_ratio){

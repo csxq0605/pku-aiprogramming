@@ -122,6 +122,11 @@ void CastTensor(const TinyTensor<Src>& src, TinyTensor<Dst>& dst);
 void SoftmaxCrossEntropyForwardBackward(const TinyTensor<float>& logits, const TinyTensor<int>& labels,
                                         TinyTensor<float>& grad, float grad_scale,
                                         TinyTensor<float>& loss_sum, TinyTensor<int>& correct, bool want_grad);
+// 训练用的软标签版本：target = (1 - eps) * (lam * onehot(y) + (1 - lam) * onehot(y2)) + eps / C（lam 是 GPU 上的标量）
+void SoftmaxCrossEntropyMix(const TinyTensor<float>& logits, const TinyTensor<int>& labels,
+                            const TinyTensor<int>& labels2, const TinyTensor<float>& lam, float eps,
+                            TinyTensor<float>& grad, float grad_scale,
+                            TinyTensor<float>& loss_sum, TinyTensor<int>& correct);
 
 // ---------------- 数据：常驻 GPU 的 uint8 图像，按 GPU 上的步数取 batch 并做数据增强 ----------------
 // step: [当前 epoch 内的 batch 序号, 内部计数, 全局步数, 0]；kernel 结束后 [0] 和 [2] 各加 1
@@ -131,6 +136,12 @@ void LoadBatch(const TinyTensor<unsigned char>& images, const TinyTensor<int>& l
                TinyTensor<int>& step, TinyTensor<T>& x, TinyTensor<int>& y, int batch,
                const std::vector<float>& mean, const std::vector<float>& std, bool augment, int pad,
                unsigned int seed);
+// 训练用：在上面的增强之后再做 Mixup / CutMix（见 misc.cu 的 MixParams），另一个样本的标签写进 y2、混合比例写进 lam[0]
+template <typename T>
+void LoadBatchMix(const TinyTensor<unsigned char>& images, const TinyTensor<int>& labels, const TinyTensor<int>& order,
+                  TinyTensor<int>& step, TinyTensor<T>& x, TinyTensor<int>& y, TinyTensor<int>& y2,
+                  TinyTensor<float>& lam, int batch, const std::vector<float>& mean, const std::vector<float>& std,
+                  int pad, unsigned int seed, float mix_prob, bool mixup, bool cutmix);
 
 // ---------------- 优化器（作用在扁平的参数 / 梯度缓冲区上，一个 kernel）----------------
 // 学习率按 GPU 上的全局步数 t = step[2] - 1 计算：前 warmup 步线性升温，之后余弦退火到 base_lr * final_ratio

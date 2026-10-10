@@ -294,6 +294,18 @@ def test_softmax_ce():
     check("ce loss", ls.numpy()[0] / 37, loss.item(), "fp32")
     check("ce grad", grad.numpy(), zt.grad.numpy(), "fp32")
     assert corr.numpy()[0] == int((z.argmax(1) == y).sum())
+    # 软标签版本（Mixup / CutMix 的两个标签 + label smoothing）对照 PyTorch 的写法
+    y2 = rng.integers(0, 200, 37).astype(np.int32)
+    for lam, eps in [(1.0, 0.1), (0.3, 0.0), (0.7, 0.1)]:
+        zt = tt_t(z)
+        yl, y2l = torch.tensor(y, dtype=torch.long), torch.tensor(y2, dtype=torch.long)
+        loss = lam * F.cross_entropy(zt, yl, label_smoothing=eps) + (1 - lam) * F.cross_entropy(zt, y2l, label_smoothing=eps)
+        loss.backward()
+        grad, ls, corr = tf([1], "gpu"), zeros_f([1]), ti([1], "gpu").zeros()
+        nn.softmax_ce_mix(tf(z, "gpu"), ti(y, "gpu"), ti(y2, "gpu"), tf(np.array([lam], np.float32), "gpu"), eps,
+                          grad, 1.0 / 37, ls, corr)
+        check("ce mix loss lam={} eps={}".format(lam, eps), ls.numpy()[0] / 37, loss.item(), "fp32")
+        check("ce mix grad lam={} eps={}".format(lam, eps), grad.numpy(), zt.grad.numpy(), "fp32")
 
 
 def hash32(x):

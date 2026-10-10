@@ -39,6 +39,7 @@ class TinyTrainer:
         B = args.batch
         self.x = (myNN.Tensor_bf16 if args.dtype == "bf16" else tf)([B, 64, 64, 3], "gpu")
         self.y = ti([B], "gpu")
+        self.y2, self.lam = ti([B], "gpu"), tf([1], "gpu")   # 正则化：Mixup / CutMix 的另一个标签与混合比例
         self.order = ti([self.n_train], "gpu")
         self.step = ti(np.zeros(4, np.int32), "gpu")   # [本 epoch 的 batch 序号, 内部计数, 全局步数, 0]
         self.loss_sum, self.correct = tf([1], "gpu").zeros(), ti([1], "gpu").zeros()
@@ -54,11 +55,20 @@ class TinyTrainer:
     def one_step(self):
         a, mdl = self.args, self.model
         mdl.flat_g.zeros()
-        myNN.load_batch(self.images, self.labels, self.order, self.step, self.x, self.y, a.batch, C.MEAN, C.STD,
-                        True, C.PAD, self.aug_seed)
+        if a.regularize:
+            p, mixup, cutmix = C.mix_cfg(a)
+            myNN.load_batch_mix(self.images, self.labels, self.order, self.step, self.x, self.y, self.y2, self.lam,
+                                a.batch, C.MEAN, C.STD, C.PAD, self.aug_seed, p, mixup, cutmix)
+        else:
+            myNN.load_batch(self.images, self.labels, self.order, self.step, self.x, self.y, a.batch, C.MEAN, C.STD,
+                            True, C.PAD, self.aug_seed)
         logits = mdl(Tensor(self.x, requires_grad=False), training=True)
-        myNN.softmax_ce(logits.realize_cached_data(), self.y, self.dlogits, 1.0 / a.batch, self.loss_sum,
-                        self.correct, True)
+        if a.regularize:
+            myNN.softmax_ce_mix(logits.realize_cached_data(), self.y, self.y2, self.lam, a.label_smoothing,
+                                self.dlogits, 1.0 / a.batch, self.loss_sum, self.correct)
+        else:
+            myNN.softmax_ce(logits.realize_cached_data(), self.y, self.dlogits, 1.0 / a.batch, self.loss_sum,
+                            self.correct, True)
         compute_gradient_of_variables(logits, Tensor.make_const(self.dlogits), free_graph=True)
         lowp = mdl.flat_lowp
         if a.optimizer == "sgd":
