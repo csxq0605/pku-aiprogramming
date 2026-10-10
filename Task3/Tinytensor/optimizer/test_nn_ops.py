@@ -133,6 +133,22 @@ def test_batchnorm():
                 check(tag + " eval", ye.numpy(), want.numpy(), dtype)
 
 
+def test_act():
+    # 单独的 ReLU / GELU（--no-fuse 时用），对照 PyTorch
+    for dtype in DTYPES:
+        for act, fn in ((1, torch.relu), (2, F.gelu)):
+            x = rounded(rng.standard_normal((3, 5, 7, 16)) * 2, dtype)
+            dy = rounded(rng.standard_normal(x.shape), dtype)
+            xt = tt_t(x)
+            yt = fn(xt)
+            yt.backward(torch.tensor(dy, dtype=torch.float64))
+            X, y, dx = to_tt(x, dtype), empty(dtype), empty(dtype)
+            nn.act_forward(X, y, act)
+            nn.act_backward(X, to_tt(dy, dtype), dx, act)
+            check("act{} fwd".format(act), y.numpy(), yt.detach().numpy(), dtype)
+            check("act{} bwd".format(act), dx.numpy(), xt.grad.numpy(), dtype)
+
+
 def test_layernorm():
     for dtype in DTYPES:
         x = rounded(rng.standard_normal((3, 5, 48)) * 3 + 1, dtype)
@@ -351,7 +367,7 @@ def test_optimizers():
 
 
 if __name__ == "__main__":
-    for fn in [test_conv, test_batchnorm, test_layernorm, test_pooling, test_linear, test_attention, test_tokens,
+    for fn in [test_conv, test_batchnorm, test_act, test_layernorm, test_pooling, test_linear, test_attention, test_tokens,
                test_softmax_ce, test_load_batch, test_optimizers]:
         fn()
         print("PASS", fn.__name__)

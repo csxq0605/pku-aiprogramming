@@ -258,6 +258,24 @@ class Add(NNOp):
         return out_grad, out_grad
 
 
+class Act(NNOp):
+    """单独的激活 y = act(x)，act 1 relu / 2 gelu（--no-fuse 消融实验用；默认融合进 BN / Linear）"""
+
+    def __init__(self, act):
+        self.act = act
+
+    def compute(self, x):
+        y = new_like(dtype_of(x))
+        myNN.act_forward(x, y, self.act)
+        return y
+
+    def gradient(self, out_grad, node):
+        x = node.inputs[0].realize_cached_data()
+        dx = new_like(dtype_of(x))
+        myNN.act_backward(x, out_grad.realize_cached_data(), dx, self.act)
+        return (const(dx),)
+
+
 class View(NNOp):
     """不拷贝的 reshape：输出与输入共享显存（view 会让输入的 Python 对象保持存活）"""
 

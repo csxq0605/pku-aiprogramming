@@ -43,6 +43,8 @@ def parse_args(extra=None):
     p.add_argument("--bench", type=int, default=0, help=">0 时只测吞吐：预热后计时这么多个 step，不训练完整 epoch")
     p.add_argument("--bench-warmup", type=int, default=20)
     p.add_argument("--train-limit", type=int, default=0, help="只用前 N 张训练图（调试用）")
+    p.add_argument("--no-fuse", dest="fuse", action="store_false",
+                   help="TinyTensor 不用融合算子：BN、残差相加、ReLU / GELU 各自一个 kernel（消融实验）")
     p.add_argument("--tag", default="")
     if extra:
         extra(p)

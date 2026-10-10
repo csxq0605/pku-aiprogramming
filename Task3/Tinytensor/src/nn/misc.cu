@@ -244,6 +244,26 @@ __global__ void AdamWKernel(float* __restrict__ w, const float* __restrict__ g, 
 
 int Capped(size_t n){ return std::min(GridFor(n, 256), 24 * 32); }
 
+// 单独的激活（不融合时用）：act 1 = relu，2 = gelu（erf 形式，与 PyTorch 默认一致）
+__device__ __forceinline__ float ActF(float z, int act){
+    return act == 1 ? fmaxf(z, 0.f) : 0.5f * z * (1.f + erff(z * 0.70710678f));
+}
+__device__ __forceinline__ float ActGrad(float z, int act){
+    if (act == 1) return z > 0.f ? 1.f : 0.f;
+    const float cdf = 0.5f * (1.f + erff(z * 0.70710678f));
+    return cdf + z * 0.39894228f * __expf(-0.5f * z * z);
+}
+template <typename T>
+__global__ void ActFwdKernel(const T* __restrict__ x, T* __restrict__ y, size_t n, int act){
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x)
+        y[i] = FromF<T>(ActF(ToF(x[i]), act));
+}
+template <typename T>
+__global__ void ActBwdKernel(const T* __restrict__ x, const T* __restrict__ dy, T* __restrict__ dx, size_t n, int act){
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x)
+        dx[i] = FromF<T>(ToF(dy[i]) * ActGrad(ToF(x[i]), act));
+}
+
 }  // namespace
 
 template <typename T>
@@ -285,6 +305,20 @@ void AddForward(const TinyTensor<T>& a, const TinyTensor<T>& b, TinyTensor<T>& o
     NNCheckGpu(a, "add"); NNCheck(a.size == b.size, "add: size mismatch");
     out.resize_discard(a.shape);
     AddKernel<T><<<Capped(a.size), 256>>>(a.p_data, b.p_data, out.p_data, a.size);
+}
+
+template <typename T>
+void ActForward(const TinyTensor<T>& x, TinyTensor<T>& y, int act){
+    NNCheckGpu(x, "act"); NNCheck(act == 1 || act == 2, "act: 1 relu / 2 gelu");
+    y.resize_discard(x.shape);
+    ActFwdKernel<T><<<Capped(x.size), 256>>>(x.p_data, y.p_data, x.size, act);
+}
+
+template <typename T>
+void ActBackward(const TinyTensor<T>& x, const TinyTensor<T>& dy, TinyTensor<T>& dx, int act){
+    NNCheckGpu(x, "act_backward"); NNCheck(dy.size == x.size, "act_backward: size mismatch");
+    dx.resize_discard(x.shape);
+    ActBwdKernel<T><<<Capped(x.size), 256>>>(x.p_data, dy.p_data, dx.p_data, x.size, act);
 }
 
 template <typename Src, typename Dst>
@@ -372,7 +406,7 @@ void AdamWStep(TinyTensor<float>& w, const TinyTensor<float>& g, TinyTensor<floa
                                         const std::vector<int>&); \
     template void GlobalAvgPoolForward<T>(const TinyTensor<T>&, TinyTensor<T>&); \
     template void GlobalAvgPoolBackward<T>(const TinyTensor<T>&, TinyTensor<T>&, const std::vector<int>&); \
-    template void AddForward<T>(const TinyTensor<T>&, const TinyTensor<T>&, TinyTensor<T>&); \
+    template void AddForward<T>(const TinyTensor<T>&, const TinyTensor<T>&, TinyTensor<T>&);     template void ActForward<T>(const TinyTensor<T>&, TinyTensor<T>&, int);     template void ActBackward<T>(const TinyTensor<T>&, const TinyTensor<T>&, TinyTensor<T>&, int); \
     template void TokensForward<T>(const TinyTensor<T>&, const TinyTensor<T>&, const TinyTensor<T>&, TinyTensor<T>&); \
     template void TokensBackward<T>(const TinyTensor<T>&, TinyTensor<T>&, TinyTensor<float>&, TinyTensor<float>&); \
     template void SelectTokenForward<T>(const TinyTensor<T>&, TinyTensor<T>&); \

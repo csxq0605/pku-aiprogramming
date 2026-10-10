@@ -27,6 +27,8 @@ void BindOps(py::module& m){
     m.def("select_token_forward", &SelectTokenForward<T>);
     m.def("select_token_backward", &SelectTokenBackward<T>);
     m.def("add", &AddForward<T>);
+    m.def("act_forward", &ActForward<T>);
+    m.def("act_backward", &ActBackward<T>);
     m.def("load_batch", &LoadBatch<T>);
 }
 

@@ -4,6 +4,10 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
+#include <stdexcept>
+#include <string>
 
 const int BLOCK_SIZE = 256;
 
@@ -55,8 +59,14 @@ inline Type* GpuAlloc(size_t n){
     if (cudaMalloc(&p, bytes) != cudaSuccess && !capturing){
         cudaGetLastError();
         GpuPoolRelease();
-        cudaMalloc(&p, bytes);
+        if (cudaMalloc(&p, bytes) != cudaSuccess){
+            cudaGetLastError();
+            p = nullptr;
+        }
     }
+    // 申请失败时直接报显存不足，而不是把空指针交给 kernel（之后的报错会很难看懂）
+    if (p == nullptr && bytes > 0)
+        throw std::runtime_error("GPU out of memory: failed to allocate " + std::to_string(bytes >> 20) + " MB");
     return (Type*)p;
 }
 

@@ -31,9 +31,11 @@ class ImageModel:
     name = None
     num_classes = 200
 
-    def __init__(self, dtype="fp32", seed=0):
+    def __init__(self, dtype="fp32", seed=0, fuse=True):
         assert dtype in ("fp32", "bf16")
         self.dtype, self.seed = dtype, seed
+        # fuse=False：BN / 残差相加 / ReLU、Linear / GELU 拆成独立算子（数学上相同，用来测融合省了多少）
+        self.fuse = fuse
         self.params, self.bns = [], []
         self.build()
         self._allocate()
@@ -101,6 +103,11 @@ class ImageModel:
 
     def apply_conv_bn(self, x, layer, relu=True, residual=None):
         y = F.Conv(layer["w"], layer["stride"], layer["pad"], layer["groups"])(x)
+        if not self.fuse:
+            y = F.BatchNorm(layer["bn"], False, self.training)(y)
+            if residual is not None:
+                y = F.Add()(y, residual)
+            return F.Act(1)(y) if relu else y
         op = F.BatchNorm(layer["bn"], relu, self.training)
         return op(y, residual) if residual is not None else op(y)
 
@@ -241,7 +248,8 @@ class ViTTiny(ImageModel):
             y = F.Attention(H)(F.View([B, L, 3, H, D // H])(y))
             y = F.Linear(*blk["proj"])(F.View([B, L, D])(y))
             x = F.Add()(x, y)
-            y = F.Linear(*blk["fc1"], act=2)(F.LayerNorm(*blk["ln2"])(x))
+            y = F.LayerNorm(*blk["ln2"])(x)
+            y = F.Linear(*blk["fc1"], act=2)(y) if self.fuse else F.Act(2)(F.Linear(*blk["fc1"])(y))
             x = F.Add()(x, F.Linear(*blk["fc2"])(y))
         x = F.SelectToken()(F.LayerNorm(*self.norm)(x))
         return F.Linear(*self.head, out_f32=True)(x)

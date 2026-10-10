@@ -109,6 +109,11 @@ void SelectTokenBackward(const TinyTensor<T>& dy, TinyTensor<T>& dx, const std::
 // ---------------- 逐元素 ----------------
 template <typename T>
 void AddForward(const TinyTensor<T>& a, const TinyTensor<T>& b, TinyTensor<T>& out);
+// 单独的激活 y = act(x)，act 1 relu / 2 gelu；反向 dx = dy * act'(x)（不融合的消融实验用）
+template <typename T>
+void ActForward(const TinyTensor<T>& x, TinyTensor<T>& y, int act);
+template <typename T>
+void ActBackward(const TinyTensor<T>& x, const TinyTensor<T>& dy, TinyTensor<T>& dx, int act);
 template <typename Src, typename Dst>
 void CastTensor(const TinyTensor<Src>& src, TinyTensor<Dst>& dst);
 

@@ -31,7 +31,7 @@ class TinyTrainer:
         self.val_order = ti(np.arange(vx.shape[0], dtype=np.int32), "gpu")
         self.n_val = vx.shape[0]
 
-        self.model = MODELS[args.arch](args.dtype, args.seed)
+        self.model = MODELS[args.arch](args.dtype, args.seed, fuse=args.fuse)
         self.num_params = sum(int(np.prod(p.shape)) for p in self.model.params)
         os.makedirs(os.path.dirname(C.init_path(args.arch, args.seed)), exist_ok=True)
         self.model.export_init(C.init_path(args.arch, args.seed))
@@ -129,5 +129,5 @@ if __name__ == "__main__":
     data = C.load_data(args.train_limit)
     trainer = TinyTrainer(args, data)
     del data
-    mode = "graph" if args.graph else "eager"
-    C.run(trainer, args, dict(key="tiny_" + mode, name="TinyTensor ({})".format(mode)))
+    mode = ("graph" if args.graph else "eager") + ("" if args.fuse else ", unfused")
+    C.run(trainer, args, dict(key="tiny_" + mode.replace(", ", "_"), name="TinyTensor ({})".format(mode)))
