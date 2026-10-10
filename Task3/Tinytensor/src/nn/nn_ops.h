@@ -46,10 +46,10 @@ template <typename T>
 void BatchNormEval(const TinyTensor<T>& x, const TinyTensor<float>& gamma, const TinyTensor<float>& beta,
                    const TinyTensor<float>& running_mean, const TinyTensor<float>& running_var,
                    TinyTensor<T>& y, const TinyTensor<T>* residual, bool relu, float eps);
-// 反向：g = dy * [y > 0]（relu 时）；dresidual = g（需要时）；dgamma / dbeta 累加
+// 反向：g = dy * [y > 0]（relu 时；没有残差时由 x、gamma、beta 重算，不读 y）；dresidual = g（需要时）；dgamma / dbeta 累加
 template <typename T>
 void BatchNormBackward(const TinyTensor<T>& x, const TinyTensor<T>& y, const TinyTensor<T>& dy,
-                       const TinyTensor<float>& gamma, const TinyTensor<float>& stats,
+                       const TinyTensor<float>& gamma, const TinyTensor<float>& beta, const TinyTensor<float>& stats,
                        TinyTensor<T>& dx, TinyTensor<float>& dgamma, TinyTensor<float>& dbeta,
                        TinyTensor<T>* dresidual, bool relu, float eps);
 

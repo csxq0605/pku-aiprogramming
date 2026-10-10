@@ -116,7 +116,7 @@ def test_batchnorm():
                 check(tag + " running_var", run_v.numpy(), rv.numpy(), dtype)
                 dx, dg, db = empty(dtype), zeros_f([C]), zeros_f([C])
                 dres = empty(dtype) if res else None
-                nn.batchnorm_backward(X, y, to_tt(dy, dtype), G, stats, dx, dg, db, dres, relu, 1e-5)
+                nn.batchnorm_backward(X, y, to_tt(dy, dtype), G, B, stats, dx, dg, db, dres, relu, 1e-5)
                 check(tag + " dx", dx.numpy(), xt.grad.numpy(), dtype, 5e-5 if dtype == "fp32" else 4e-2)
                 check(tag + " dgamma", dg.numpy(), gt.grad.numpy(), dtype)
                 check(tag + " dbeta", db.numpy(), bt.grad.numpy(), dtype)

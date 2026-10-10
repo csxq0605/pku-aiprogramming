@@ -1,5 +1,6 @@
 // BatchNorm（NHWC，按通道）与 LayerNorm（按最后一维）
 #include <algorithm>
+#include <cstdlib>
 #include <initializer_list>
 #include "nn_common.cuh"
 #include "nn_ops.h"
@@ -7,6 +8,15 @@
 namespace {
 
 // ---------- BatchNorm ----------
+// 均值 / 方差和仿射系数：前向和反向（重算 ReLU 掩码）共用同一套显式舍入的算式，保证两边逐位一致
+__device__ __forceinline__ void BnMeanVar(const float* stats, int c, int C, int rows, float& mean, float& var){
+    mean = stats[c] / rows;
+    var = fmaxf(__fmaf_rn(-mean, mean, stats[C + c] / rows), 0.f);
+}
+__device__ __forceinline__ void BnAffine(float mean, float var, float gamma, float beta, float eps, float& sc, float& sf){
+    sc = gamma * rsqrtf(var + eps);
+    sf = __fmaf_rn(-mean, sc, beta);
+}
 // 按列（通道）求和：x 视为 [rows, C]。block = 32 列 x 8 行，grid.y 把行切成若干段，结果 atomicAdd
 template <typename T, bool BACKWARD, bool RELU>
 __global__ void BnReduce(const T* __restrict__ x, const T* __restrict__ y, const T* __restrict__ dy,
@@ -60,8 +70,7 @@ __global__ void BnApply(const T* __restrict__ x, const float* __restrict__ gamma
     for (int c = threadIdx.x; c < C; c += blockDim.x){
         float mean, var;
         if (TRAIN){
-            mean = stats_or_mean[c] / rows;
-            var = fmaxf(stats_or_mean[C + c] / rows - mean * mean, 0.f);
+            BnMeanVar(stats_or_mean, c, C, rows, mean, var);
             if (blockIdx.x == 0){
                 running_mean[c] = (1.f - momentum) * running_mean[c] + momentum * mean;
                 running_var[c] = (1.f - momentum) * running_var[c] + momentum * var * rows / fmaxf(rows - 1, 1);
@@ -71,14 +80,12 @@ __global__ void BnApply(const T* __restrict__ x, const float* __restrict__ gamma
             mean = stats_or_mean[c];
             var = var_eval[c];
         }
-        float sc = gamma[c] * rsqrtf(var + eps);
-        scale[c] = sc;
-        shift[c] = beta[c] - mean * sc;
+        BnAffine(mean, var, gamma[c], beta[c], eps, scale[c], shift[c]);
     }
     __syncthreads();
     for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x){
         int c = i % C;
-        float v = ToF(x[i]) * scale[c] + shift[c];
+        float v = __fmaf_rn(ToF(x[i]), scale[c], shift[c]);
         if (RES) v += ToF(residual[i]);
         if (RELU) v = fmaxf(v, 0.f);
         y[i] = FromF<T>(v);
@@ -148,19 +155,30 @@ __device__ __forceinline__ void Store8(bf16* p, const float* v){
     *(uint4*)p = t;
 }
 
+// ReLU 掩码 y > 0：没有残差时 y = T(max(x * sc + sf, 0))，可以由 x 精确重算（与前向同一算式、同样舍入），
+// 反向就不用再读一遍 y（BN 反向的两个 kernel 各省一份激活的读取）
+template <typename T>
+__device__ __forceinline__ bool BnReluOn(float x, float sc, float sf){
+    return ToF(FromF<T>(fmaxf(__fmaf_rn(x, sc, sf), 0.f))) > 0.f;
+}
+
 // 按通道求和（同 BnReduce）：线程 (r0, cv) 负责通道 cv*8 .. cv*8+7，每轮跨 RP 个像素；block 内经共享内存归约后 atomicAdd
-template <typename T, bool BACKWARD, bool RELU>
+// RECOMP：ReLU 掩码由 x 重算（需要 gamma / beta），不读 y
+template <typename T, bool BACKWARD, bool RELU, bool RECOMP = false>
 __global__ void __launch_bounds__(BN_THREADS) BnReduceVec(const T* __restrict__ x, const T* __restrict__ y,
-        const T* __restrict__ dy, const float* __restrict__ stats, float* __restrict__ out, int rows, int C, float eps){
+        const T* __restrict__ dy, const float* __restrict__ stats, float* __restrict__ out, int rows, int C, float eps,
+        const float* __restrict__ gamma = nullptr, const float* __restrict__ beta = nullptr){
     __shared__ float sa[BN_THREADS * BN_VEC], sb[BN_THREADS * BN_VEC];   // [RP][C]
     const int CV = C / BN_VEC, RP = BN_THREADS / CV;
     const int cv = threadIdx.x % CV, r0 = threadIdx.x / CV, c0 = cv * BN_VEC;
-    float a[BN_VEC] = {}, b[BN_VEC] = {}, mean[BN_VEC], rstd[BN_VEC];
+    float a[BN_VEC] = {}, b[BN_VEC] = {}, mean[BN_VEC], rstd[BN_VEC], sc[BN_VEC], sf[BN_VEC];
     if (BACKWARD){
         #pragma unroll
         for (int j = 0; j < BN_VEC; ++j){
-            mean[j] = stats[c0 + j] / rows;
-            rstd[j] = rsqrtf(fmaxf(stats[C + c0 + j] / rows - mean[j] * mean[j], 0.f) + eps);
+            float var;
+            BnMeanVar(stats, c0 + j, C, rows, mean[j], var);
+            rstd[j] = rsqrtf(var + eps);
+            if (RECOMP) BnAffine(mean[j], var, gamma[c0 + j], beta[c0 + j], eps, sc[j], sf[j]);
         }
     }
     for (int r = blockIdx.x * RP + r0; r < rows; r += gridDim.x * RP){
@@ -174,10 +192,10 @@ __global__ void __launch_bounds__(BN_THREADS) BnReduceVec(const T* __restrict__ 
         else{
             float g[BN_VEC], yy[BN_VEC];
             Load8(dy + i, g);
-            if (RELU) Load8(y + i, yy);
+            if (RELU && !RECOMP) Load8(y + i, yy);
             #pragma unroll
             for (int j = 0; j < BN_VEC; ++j){
-                if (RELU && yy[j] <= 0.f) g[j] = 0.f;
+                if (RELU && (RECOMP ? !BnReluOn<T>(v[j], sc[j], sf[j]) : yy[j] <= 0.f)) g[j] = 0.f;
                 a[j] += g[j];
                 b[j] += g[j] * (v[j] - mean[j]) * rstd[j];
             }
@@ -206,8 +224,7 @@ __global__ void __launch_bounds__(BN_THREADS) BnApplyVec(const T* __restrict__ x
     for (int c = threadIdx.x; c < C; c += blockDim.x){
         float mean, var;
         if (TRAIN){
-            mean = stats_or_mean[c] / rows;
-            var = fmaxf(stats_or_mean[C + c] / rows - mean * mean, 0.f);
+            BnMeanVar(stats_or_mean, c, C, rows, mean, var);
             if (blockIdx.x == 0){
                 running_mean[c] = (1.f - momentum) * running_mean[c] + momentum * mean;
                 running_var[c] = (1.f - momentum) * running_var[c] + momentum * var * rows / fmaxf(rows - 1, 1);
@@ -217,9 +234,7 @@ __global__ void __launch_bounds__(BN_THREADS) BnApplyVec(const T* __restrict__ x
             mean = stats_or_mean[c];
             var = var_eval[c];
         }
-        float sc = gamma[c] * rsqrtf(var + eps);
-        scale[c] = sc;
-        shift[c] = beta[c] - mean * sc;
+        BnAffine(mean, var, gamma[c], beta[c], eps, scale[c], shift[c]);
     }
     __syncthreads();
     const int CV = C / BN_VEC;
@@ -235,7 +250,7 @@ __global__ void __launch_bounds__(BN_THREADS) BnApplyVec(const T* __restrict__ x
         const float* sf = shift + cv * BN_VEC;
         #pragma unroll
         for (int j = 0; j < BN_VEC; ++j){
-            float o = xv[j] * sc[j] + sf[j];
+            float o = __fmaf_rn(xv[j], sc[j], sf[j]);
             if (RES) o += rv[j];
             if (RELU) o = fmaxf(o, 0.f);
             xv[j] = o;
@@ -246,22 +261,26 @@ __global__ void __launch_bounds__(BN_THREADS) BnApplyVec(const T* __restrict__ x
     }
 }
 
-// 同 BnBackwardApply，按 8 个通道一组处理
-template <typename T, bool RELU, bool DRES>
+// 同 BnBackwardApply，按 8 个通道一组处理；RECOMP 同 BnReduceVec（ReLU 掩码由 x 重算，不读 y）
+template <typename T, bool RELU, bool DRES, bool RECOMP = false>
 __global__ void __launch_bounds__(BN_THREADS) BnBackwardApplyVec(const T* __restrict__ x, const T* __restrict__ y,
         const T* __restrict__ dy, const float* __restrict__ gamma, const float* __restrict__ stats,
         const float* __restrict__ red, float* __restrict__ dgamma, float* __restrict__ dbeta,
-        T* __restrict__ dx, T* __restrict__ dres, size_t total, int rows, int C, float eps){
+        T* __restrict__ dx, T* __restrict__ dres, size_t total, int rows, int C, float eps,
+        const float* __restrict__ beta = nullptr){
     extern __shared__ float sh[];
-    float* k_g = sh;           // gamma * rstd
+    float* k_g = sh;           // gamma * rstd（= 前向的 scale）
     float* mean_s = sh + C;
     float* rstd_s = sh + 2 * C;
     float* mg = sh + 3 * C;    // sum_g / M
     float* mgx = sh + 4 * C;   // sum_gx / M
+    float* sf_s = sh + 5 * C;  // 前向的 shift（RECOMP）
     for (int c = threadIdx.x; c < C; c += blockDim.x){
-        float mean = stats[c] / rows;
-        float rstd = rsqrtf(fmaxf(stats[C + c] / rows - mean * mean, 0.f) + eps);
-        k_g[c] = gamma[c] * rstd;
+        float mean, var;
+        BnMeanVar(stats, c, C, rows, mean, var);
+        float rstd = rsqrtf(var + eps);
+        if (RECOMP) BnAffine(mean, var, gamma[c], beta[c], eps, k_g[c], sf_s[c]);
+        else k_g[c] = gamma[c] * rstd;
         mean_s[c] = mean;
         rstd_s[c] = rstd;
         mg[c] = red[c] / rows;
@@ -280,12 +299,12 @@ __global__ void __launch_bounds__(BN_THREADS) BnBackwardApplyVec(const T* __rest
     for (; v < nv; v += stride){
         float g[BN_VEC], yy[BN_VEC], xv[BN_VEC];
         Load8(dy + v * BN_VEC, g);
-        if (RELU) Load8(y + v * BN_VEC, yy);
+        if (RELU && !RECOMP) Load8(y + v * BN_VEC, yy);
         Load8(x + v * BN_VEC, xv);
         const int c0 = cv * BN_VEC;
         #pragma unroll
         for (int j = 0; j < BN_VEC; ++j){
-            if (RELU && yy[j] <= 0.f) g[j] = 0.f;
+            if (RELU && (RECOMP ? !BnReluOn<T>(xv[j], k_g[c0 + j], sf_s[c0 + j]) : yy[j] <= 0.f)) g[j] = 0.f;
             const float xhat = (xv[j] - mean_s[c0 + j]) * rstd_s[c0 + j];
             xv[j] = k_g[c0 + j] * (g[j] - mg[c0 + j] - xhat * mgx[c0 + j]);
         }
@@ -309,6 +328,12 @@ int BnReduceBlocks(int C, int rows){
 }
 int BnApplyBlocks(size_t total){
     return (int)std::max<size_t>(1, std::min<size_t>((total / BN_VEC + BN_THREADS - 1) / BN_THREADS, DeviceSmCount() * 8));
+}
+
+// TT_BN_RECOMPUTE=0：反向照旧读 y 求 ReLU 掩码（对照实验用）
+bool RecomputeMask(){
+    static const bool on = [](){ const char* e = getenv("TT_BN_RECOMPUTE"); return !(e && atoi(e) == 0); }();
+    return on;
 }
 
 int ReduceSplits(int C, int rows){
@@ -454,7 +479,7 @@ void BatchNormEval(const TinyTensor<T>& x, const TinyTensor<float>& gamma, const
 
 template <typename T>
 void BatchNormBackward(const TinyTensor<T>& x, const TinyTensor<T>& y, const TinyTensor<T>& dy,
-                       const TinyTensor<float>& gamma, const TinyTensor<float>& stats,
+                       const TinyTensor<float>& gamma, const TinyTensor<float>& beta, const TinyTensor<float>& stats,
                        TinyTensor<T>& dx, TinyTensor<float>& dgamma, TinyTensor<float>& dbeta,
                        TinyTensor<T>* dresidual, bool relu, float eps){
     NNCheckGpu(x, "batchnorm_backward");
@@ -469,9 +494,17 @@ void BatchNormBackward(const TinyTensor<T>& x, const TinyTensor<T>& y, const Tin
         dresidual->resize_discard(x.shape);
         dres = dresidual->p_data;
     }
-    const size_t smem = 5 * C * sizeof(float);
+    const size_t smem = 6 * C * sizeof(float);
     if (BnVecOk(C, {x.p_data, y.p_data, dy.p_data, dx.p_data, dres})){
         const int rb = BnReduceBlocks(C, rows), nb = BnApplyBlocks(x.size);
+        // 没有残差的 BN+ReLU（VGG 全部、ResNet 每块的第一个 BN）：掩码由 x 重算，两个 kernel 都不读 y
+        if (relu && !dres && RecomputeMask()){
+            BnReduceVec<T, true, true, true><<<rb, BN_THREADS>>>(x.p_data, nullptr, dy.p_data, stats.p_data, red.p_data,
+                                                                 rows, C, eps, gamma.p_data, beta.p_data);
+            BnBackwardApplyVec<T, true, false, true><<<nb, BN_THREADS, smem>>>(x.p_data, nullptr, dy.p_data, gamma.p_data,
+                stats.p_data, red.p_data, dgamma.p_data, dbeta.p_data, dx.p_data, nullptr, x.size, rows, C, eps, beta.p_data);
+            return;
+        }
         if (relu) BnReduceVec<T, true, true><<<rb, BN_THREADS>>>(x.p_data, y.p_data, dy.p_data, stats.p_data, red.p_data, rows, C, eps);
         else      BnReduceVec<T, true, false><<<rb, BN_THREADS>>>(x.p_data, y.p_data, dy.p_data, stats.p_data, red.p_data, rows, C, eps);
 #define APPLY(A, D) BnBackwardApplyVec<T, A, D><<<nb, BN_THREADS, smem>>>(x.p_data, y.p_data, dy.p_data, gamma.p_data,         stats.p_data, red.p_data, dgamma.p_data, dbeta.p_data, dx.p_data, dres, x.size, rows, C, eps)
@@ -522,7 +555,7 @@ void LayerNormBackward(const TinyTensor<T>& x, const TinyTensor<T>& dy, const Ti
     template void BatchNormEval<T>(const TinyTensor<T>&, const TinyTensor<float>&, const TinyTensor<float>&, \
         const TinyTensor<float>&, const TinyTensor<float>&, TinyTensor<T>&, const TinyTensor<T>*, bool, float); \
     template void BatchNormBackward<T>(const TinyTensor<T>&, const TinyTensor<T>&, const TinyTensor<T>&, \
-        const TinyTensor<float>&, const TinyTensor<float>&, TinyTensor<T>&, TinyTensor<float>&, TinyTensor<float>&, \
+        const TinyTensor<float>&, const TinyTensor<float>&, const TinyTensor<float>&, TinyTensor<T>&, TinyTensor<float>&, TinyTensor<float>&, \
         TinyTensor<T>*, bool, float); \
     template void LayerNormForward<T>(const TinyTensor<T>&, const TinyTensor<float>&, const TinyTensor<float>&, \
         TinyTensor<T>&, TinyTensor<float>&, float); \

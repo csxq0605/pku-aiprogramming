@@ -106,7 +106,7 @@ class BatchNorm(NNOp):
         has_res = len(node.inputs) > 1
         dx = new_like(dtype_of(x))
         dres = new_like(dtype_of(x)) if has_res else None
-        myNN.batchnorm_backward(x, y, out_grad.realize_cached_data(), bn.gamma.w, self.stats, dx, bn.gamma.g,
+        myNN.batchnorm_backward(x, y, out_grad.realize_cached_data(), bn.gamma.w, bn.beta.w, self.stats, dx, bn.gamma.g,
                                 bn.beta.g, dres, self.relu, bn.eps)
         return (const(dx), const(dres)) if has_res else (const(dx),)
 
