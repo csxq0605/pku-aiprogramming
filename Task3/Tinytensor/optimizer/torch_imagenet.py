@@ -133,9 +133,9 @@ class ViTTiny(nn.Module):
         return self.head(self.norm(x)[:, 0])
 
 
-def build(arch):
-    return {"vgg16": lambda: VGG16(), "resnet18": lambda: ResNet(BasicBlock, 1),
-            "resnext26": lambda: ResNet(Bottleneck, 4), "vit_tiny": lambda: ViTTiny()}[arch]()
+def build(arch, num_classes=200):
+    return {"vgg16": lambda: VGG16(num_classes), "resnet18": lambda: ResNet(BasicBlock, 1, num_classes),
+            "resnext26": lambda: ResNet(Bottleneck, 4, num_classes), "vit_tiny": lambda: ViTTiny(num_classes)}[arch]()
 
 
 def load_tinytensor_init(model, path):
@@ -220,7 +220,7 @@ class TorchTrainer:
                                   args.dtype, cl, True, C.aug_seed(args.seed))
         self.val_data = GpuData(torch.from_numpy(vx).to(dev), torch.from_numpy(vy).to(dev), C.EVAL_BATCH,
                                 args.dtype, cl, False, 0)
-        self.model = build(args.arch).to(dev)
+        self.model = build(args.arch, C.NUM_CLASSES).to(dev)
         load_tinytensor_init(self.model, C.init_path(args.arch, args.seed))
         if cl:
             self.model = self.model.to(memory_format=torch.channels_last)

@@ -31,9 +31,10 @@ class ImageModel:
     name = None
     num_classes = 200
 
-    def __init__(self, dtype="fp32", seed=0, fuse=True):
+    def __init__(self, dtype="fp32", seed=0, fuse=True, num_classes=200):
         assert dtype in ("fp32", "bf16")
         self.dtype, self.seed = dtype, seed
+        self.num_classes = num_classes
         # fuse=False：BN / 残差相加 / ReLU、Linear / GELU 拆成独立算子（数学上相同，用来测融合省了多少）
         self.fuse = fuse
         self.params, self.bns = [], []

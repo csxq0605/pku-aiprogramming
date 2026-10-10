@@ -12,10 +12,18 @@ import time
 
 import numpy as np
 
-DATA_DIR = os.path.expanduser("~/data/tiny-imagenet-200")
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "imagenet")
-MEAN = [0.4802, 0.4481, 0.3975]
-STD = [0.2764, 0.2689, 0.2816]
+# 数据集：tiny = Tiny ImageNet（10 万张训练图，200 类）；imagenet64 = ImageNet-1k 缩到 64x64（128 万张，1000 类，
+# 由 prepare_imagenet64.py 生成）。parse_args 按 --dataset 设置下面这些模块级变量
+DATASETS = {
+    "tiny": dict(DATA_DIR="~/data/tiny-imagenet-200", NUM_CLASSES=200,
+                 MEAN=[0.4802, 0.4481, 0.3975], STD=[0.2764, 0.2689, 0.2816]),
+    "imagenet64": dict(DATA_DIR="~/data/imagenet64", NUM_CLASSES=1000,
+                       MEAN=[0.485, 0.456, 0.406], STD=[0.229, 0.224, 0.225]),
+}
+DATASET = "tiny"
+DATA_DIR = os.path.expanduser(DATASETS["tiny"]["DATA_DIR"])
+NUM_CLASSES, MEAN, STD = 200, DATASETS["tiny"]["MEAN"], DATASETS["tiny"]["STD"]
 PAD = 4          # 随机裁剪：四周补 4 个像素再裁回 64x64
 EVAL_BATCH = 250
 
@@ -31,6 +39,7 @@ DEFAULTS = {
 def parse_args(extra=None):
     p = argparse.ArgumentParser()
     p.add_argument("--arch", default="resnet18", choices=sorted(DEFAULTS))
+    p.add_argument("--dataset", default="tiny", choices=sorted(DATASETS))
     p.add_argument("--dtype", default="fp32", choices=["fp32", "bf16"])
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch", type=int, default=128)
@@ -49,6 +58,7 @@ def parse_args(extra=None):
     if extra:
         extra(p)
     args = p.parse_args()
+    use_dataset(args.dataset)
     d = DEFAULTS[args.arch]
     args.optimizer = d["optimizer"]
     args.lr = d["lr"] if args.lr is None else args.lr
@@ -58,13 +68,26 @@ def parse_args(extra=None):
     return args
 
 
+def use_dataset(name):
+    global DATASET, DATA_DIR, NUM_CLASSES, MEAN, STD
+    ds = DATASETS[name]
+    DATASET, DATA_DIR = name, os.path.expanduser(ds["DATA_DIR"])
+    NUM_CLASSES, MEAN, STD = ds["NUM_CLASSES"], ds["MEAN"], ds["STD"]
+
+
+def prefix():
+    """结果文件名前缀：Tiny ImageNet 保持原来的文件名，其它数据集加上数据集名"""
+    return "" if DATASET == "tiny" else DATASET + "_"
+
+
 def load_data(train_limit=0):
     def load(name):
-        return np.load(os.path.join(DATA_DIR, name))
+        # mmap：ImageNet64 的训练集约 15.7GB，--train-limit 时只读需要的前 N 张
+        return np.load(os.path.join(DATA_DIR, name), mmap_mode="r")
     tx, ty, vx, vy = load("train_x.npy"), load("train_y.npy"), load("val_x.npy"), load("val_y.npy")
     if train_limit:
         tx, ty = tx[:train_limit], ty[:train_limit]
-    return tx, ty.astype(np.int32), vx, vy.astype(np.int32)
+    return np.ascontiguousarray(tx), ty.astype(np.int32), np.ascontiguousarray(vx), vy.astype(np.int32)
 
 
 def schedule(args, steps_per_epoch):
@@ -83,7 +106,7 @@ def aug_seed(seed):
 
 
 def init_path(arch, seed):
-    return os.path.join(RESULTS, "init", "{}_seed{}.npz".format(arch, seed))
+    return os.path.join(RESULTS, "init", "{}{}_seed{}.npz".format(prefix(), arch, seed))
 
 
 def run(trainer, args, framework):
@@ -98,8 +121,8 @@ def run(trainer, args, framework):
     n_train = trainer.n_train
     steps_per_epoch = n_train // args.batch
     os.makedirs(RESULTS, exist_ok=True)
-    name = "{}_{}_{}{}".format(args.arch, args.dtype, framework["key"], ("_" + args.tag) if args.tag else "")
-    record = dict(arch=args.arch, dtype=args.dtype, framework=framework["name"], batch=args.batch,
+    name = "{}{}_{}_{}{}".format(prefix(), args.arch, args.dtype, framework["key"], ("_" + args.tag) if args.tag else "")
+    record = dict(dataset=DATASET, arch=args.arch, dtype=args.dtype, framework=framework["name"], batch=args.batch,
                   optimizer=args.optimizer, lr=args.lr, wd=args.wd, graph=args.graph, chunk=args.chunk,
                   params=trainer.num_params)
 

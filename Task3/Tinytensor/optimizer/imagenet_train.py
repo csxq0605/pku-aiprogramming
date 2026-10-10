@@ -31,7 +31,7 @@ class TinyTrainer:
         self.val_order = ti(np.arange(vx.shape[0], dtype=np.int32), "gpu")
         self.n_val = vx.shape[0]
 
-        self.model = MODELS[args.arch](args.dtype, args.seed, fuse=args.fuse)
+        self.model = MODELS[args.arch](args.dtype, args.seed, fuse=args.fuse, num_classes=C.NUM_CLASSES)
         self.num_params = sum(int(np.prod(p.shape)) for p in self.model.params)
         os.makedirs(os.path.dirname(C.init_path(args.arch, args.seed)), exist_ok=True)
         self.model.export_init(C.init_path(args.arch, args.seed))
