@@ -235,14 +235,24 @@ and 0.352 for PyTorch with CUDA Graph and 0.566 for `reduce-overhead` on the CNN
 
 | Model | Mode | s/epoch | Test acc |
 |---|---|---|---|
-| MLP | **TinyTensor + CUDA Graph** | **0.042** | 97.59% |
-| MLP | TinyTensor op-by-op | 0.105 | 97.59% |
-| MLP | PyTorch + CUDA Graph | 0.057 | 97.61% |
-| MLP | PyTorch eager | 0.511 | 97.61% |
-| CNN | **TinyTensor + CUDA Graph** | **0.198** | 98.88% |
-| CNN | TinyTensor op-by-op | 0.213 | 98.85% |
-| CNN | PyTorch + CUDA Graph | 0.219 | 98.84% |
-| CNN | PyTorch eager | 0.826 | 98.74% |
+| MLP | **TinyTensor + CUDA Graph** | **0.040** | 97.59% |
+| MLP | TinyTensor op-by-op | 0.109 | 97.59% |
+| MLP | PyTorch + CUDA Graph | 0.060 | 97.61% |
+| MLP | PyTorch eager | 0.537 | 97.61% |
+| MLP | PyTorch torch.compile (default) | 0.795 | 97.60% |
+| MLP | PyTorch torch.compile (reduce-overhead) | 0.693 | 97.60% |
+| CNN | **TinyTensor + CUDA Graph** | **0.197** | 98.88% |
+| CNN | TinyTensor op-by-op | 0.212 | 98.87% |
+| CNN | PyTorch + CUDA Graph | 0.219 | 98.74% |
+| CNN | PyTorch eager | 0.901 | 98.80% |
+| CNN | PyTorch torch.compile (default) | 1.079 | 98.79% |
+| CNN | PyTorch torch.compile (reduce-overhead) | 0.745 | 98.77% |
+
+This table was measured with the package as it is in this repository (commit `08e4993`, PyTorch 2.11, CUDA 13), after
+`tests/test_ops.py` and `tests/test_nn_ops.py` passed on the same machine. A second pass of the twelve configurations
+in the same job reproduced every time to within 5% (TinyTensor 0.041 / 0.107 / 0.197 / 0.212 s/epoch). TinyTensor
+with CUDA Graph is the fastest configuration for both models: 1.5x faster than PyTorch with CUDA Graph on the MLP and
+1.1x on the CNN.
 
 ![mnist a100](results/mnist/compare_a100.png)
 
@@ -253,8 +263,7 @@ from cuDNN's algorithm choice (PyTorch).
 One PyTorch-side limitation: for the MLP, capturing 99 or more training steps into one `torch.cuda.CUDAGraph` fails
 at replay with `CUDA error: unspecified launch failure` (PyTorch 2.11 on the A100). 50 steps or fewer work, and the
 speed is the same for 1, 10, 20 and 50 steps per graph, so `torch_baseline.py` caps the MLP at 50. The cause was not
-found. The A100 row above was measured with 10 steps per graph and has no json file; the number comes from the run
-log.
+found.
 
 ### How the training step runs on the GPU
 
@@ -282,15 +291,14 @@ Kernels per training step:
 
 ### torch.compile on MNIST
 
-On the MLP torch.compile is slower than plain eager PyTorch. A step there is only about 0.1 ms of GPU work, so the
-CPU cost of launching it decides the speed. On the CNN the result depends on the GPU's state: at full power both
-compile modes were as slow as or slower than eager, and in the power-capped runs above `reduce-overhead` was faster
-than eager.
+On the A100, torch.compile in `default` mode is slower than plain eager PyTorch on both models, and `reduce-overhead`
+is slower than eager on the MLP and 1.2x faster than eager on the CNN. Neither comes close to a hand-captured CUDA
+Graph. A step here is only 0.1-0.4 ms of GPU work, so the CPU cost of launching it decides the speed.
 
 - `default`: Inductor fuses the elementwise ops, but the compiled forward/backward still runs through the autograd
   engine and many Triton launches.
-- `reduce-overhead`: the CUDA-Graph trees add per-call bookkeeping (`cudagraph_mark_step_begin`, input copies), and that
-  costs more than the whole step.
+- `reduce-overhead`: the CUDA-Graph trees add per-call bookkeeping (`cudagraph_mark_step_begin`, input copies). On
+  the MLP that costs more than the whole step.
 - Compilation itself takes 7-10 s, which is why epoch 1 is much slower.
 
 ### GPU utilization on the laptop
