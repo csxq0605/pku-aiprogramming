@@ -4,7 +4,7 @@
 
 北京大学 2024 年秋季学期《人工智能中的编程》课程作业，以及在它基础上继续做下去的内容。
 
-课程作业一步步搭出一个小型深度学习框架 **TinyTensor**：CUDA 张量类、各种层、Python 绑定、自动微分、优化器，最后在
+课程作业一步步搭出一个小型深度学习框架 **Tiny PyTorch**：CUDA 张量类、各种层、Python 绑定、自动微分、优化器，最后在
 MNIST 上训练。这是**第一部分（基础）**。**第二部分（拓展）**把同一个框架推得更远：tensor core 卷积、BatchNorm、
 注意力、bf16 混合精度、CUDA Graph 和手写融合 kernel，足以在一张 A100 上训练 64x64 的 ImageNet-1k（VGG16、ResNet18、
 ResNeXt26、ViT-Tiny），并逐步与 PyTorch 对比速度和准确率。
@@ -38,7 +38,7 @@ results/                 本文所有数字的原始 json，以及画图脚本
 
 ## 这个包
 
-TinyTensor 的用法与 PyTorch 相同：
+Tiny PyTorch 的用法与 PyTorch 相同：
 
 ```python
 import tinytensor as tt
@@ -97,7 +97,7 @@ print(loss.numpy())                             # 只有这里会同步 GPU
   GELU 和分组卷积只在 `channels_last` 下有，`F.conv_relu_max_pool2d` 只在 `contiguous_format` 下有。某个格式下没有
   对应 kernel 时，算子抛出 `NotImplementedError`。
 
-TinyTensor 有意与 PyTorch 不同的地方：
+Tiny PyTorch 有意与 PyTorch 不同的地方：
 
 - **参数延迟创建。** 层只声明形状和初始化方式，数值在模型第一次使用时才在 GPU 上生成，所以可以先调用
   `model.to(memory_format=...)` 和 `model.manual_seed(seed)`。
@@ -131,7 +131,7 @@ python3.12 -m venv ~/tt-venv
 ~/tt-venv/bin/pip install numpy pybind11 pytest matplotlib torch torchvision --index-url https://download.pytorch.org/whl/cu126
 ```
 
-在仓库根目录构建 TinyTensor。脚本只需要 nvcc、numpy 和 pybind11 头文件。它编译 `tinytensor/csrc`，把扩展模块
+在仓库根目录构建 Tiny PyTorch。脚本只需要 nvcc、numpy 和 pybind11 头文件。它编译 `tinytensor/csrc`，把扩展模块
 `myTensor`、`myLayer`、`myNN` 写到 `tinytensor/_C/`：
 
 ```bash
@@ -160,7 +160,7 @@ PYTHON=~/tt-venv/bin/python NVCC=/usr/local/cuda-12.8/bin/nvcc ./build_linux.sh
 | Task 2 | 同一个 CNN 加上 `nn.DataParallel`（只有一张 GPU，所以测到的是开销） | 普通 98.64%，104.7 s；`nn.DataParallel` 98.66%，105.2 s |
 | Task 3 | 用自己写的框架在 MNIST 上训练 | 见下一节 |
 
-## Task 3：TinyTensor 在 MNIST 上
+## Task 3：Tiny PyTorch 在 MNIST 上
 
 训练一个 MLP（784-100-10）和一个 CNN（两段 3x3 卷积 + ReLU + 2x2 最大池化，通道数 16 和 32，然后是 128 个单元的
 隐藏层），10 个 epoch，SGD，学习率 0.1，batch 100，种子 0。PyTorch 从相同的初始权重、按相同的数据顺序训练同一个
@@ -170,8 +170,8 @@ PYTHON=~/tt-venv/bin/python NVCC=/usr/local/cuda-12.8/bin/nvcc ./build_linux.sh
 
 ```bash
 python ../../tests/test_ops.py          # 算子检查、CNN 有限差分、融合 == 未融合、CUDA Graph == 逐算子
-python mnist_mlp.py --epochs 10         # TinyTensor MLP（默认用 CUDA Graph，--no-graph 为逐算子）
-python mnist_cnn.py --epochs 10         # TinyTensor CNN
+python mnist_mlp.py --epochs 10         # Tiny PyTorch MLP（默认用 CUDA Graph，--no-graph 为逐算子）
+python mnist_cnn.py --epochs 10         # Tiny PyTorch CNN
 python torch_baseline.py --arch cnn     # PyTorch 里相同的模型 / 初始化 / 数据顺序（eager）
 python torch_baseline.py --arch cnn --graph                     # PyTorch + 手动 CUDA Graph
 python torch_baseline.py --arch cnn --compile reduce-overhead   # PyTorch + torch.compile（也可用 default）
@@ -187,9 +187,9 @@ python ../../results/mnist/plot_results.py rtx4060
 ```
 
 模型是 `tinytensor.models.MLP` 和 `tinytensor.models.CNN`，`experiments/mnist/tiny_trainer.py` 是围绕它们的训练循环。
-TinyTensor 自己初始化权重：用 CUDA 的 `random` kernel 做 Kaiming 均匀初始化（`nn.init.kaiming_uniform_`）。TinyTensor
+Tiny PyTorch 自己初始化权重：用 CUDA 的 `random` kernel 做 Kaiming 均匀初始化（`nn.init.kaiming_uniform_`）。Tiny PyTorch
 的脚本把初始权重导出到 `results/mnist/init/<arch>_seed<seed>.npz`，`torch_baseline.py` 读取同一个文件，所以要先运行
-TinyTensor 的脚本。
+Tiny PyTorch 的脚本。
 
 ### 结果
 
@@ -202,20 +202,20 @@ s/epoch 是第 2-10 个 epoch 的平均值，因为第 1 个 epoch 包含 CUDA G
 
 | 模型 | 模式 | s/epoch | 测试准确率 |
 |---|---|---|---|
-| MLP | **TinyTensor + CUDA Graph** | **0.032** | 97.59% |
-| MLP | TinyTensor 逐算子 | 0.074 | 97.59% |
+| MLP | **Tiny PyTorch + CUDA Graph** | **0.032** | 97.59% |
+| MLP | Tiny PyTorch 逐算子 | 0.074 | 97.59% |
 | MLP | PyTorch + CUDA Graph | 0.047 | 97.61% |
 | MLP | PyTorch eager | 0.327 | 97.61% |
 | MLP | PyTorch torch.compile（default） | 0.447 | 97.61% |
 | MLP | PyTorch torch.compile（reduce-overhead） | 0.429 | 97.61% |
-| CNN | **TinyTensor + CUDA Graph** | **0.286** | 98.86% |
-| CNN | TinyTensor 逐算子 | 0.322 | 98.91% |
+| CNN | **Tiny PyTorch + CUDA Graph** | **0.286** | 98.86% |
+| CNN | Tiny PyTorch 逐算子 | 0.322 | 98.91% |
 | CNN | PyTorch + CUDA Graph | 0.353 | 98.86% |
 | CNN | PyTorch eager | 0.656 | 98.74% |
 | CNN | PyTorch torch.compile（default） | 0.647 | 98.78% |
 | CNN | PyTorch torch.compile（reduce-overhead） | 0.459 | 98.83% |
 
-两个模型上最快的配置都是 TinyTensor + CUDA Graph：MLP 上比 PyTorch 加手动 CUDA Graph 快 1.5 倍，CNN 上快 1.2 倍。
+两个模型上最快的配置都是 Tiny PyTorch + CUDA Graph：MLP 上比 PyTorch 加手动 CUDA Graph 快 1.5 倍，CNN 上快 1.2 倍。
 排名与 A100 上一致。
 
 ![mnist rtx4060](results/mnist/compare_rtx4060.png)
@@ -224,14 +224,14 @@ s/epoch 是第 2-10 个 epoch 的平均值，因为第 1 个 epoch 包含 CUDA G
 
 | 模型 | 模式 | s/epoch | 测试准确率 |
 |---|---|---|---|
-| MLP | **TinyTensor + CUDA Graph** | **0.040** | 97.59% |
-| MLP | TinyTensor 逐算子 | 0.109 | 97.59% |
+| MLP | **Tiny PyTorch + CUDA Graph** | **0.040** | 97.59% |
+| MLP | Tiny PyTorch 逐算子 | 0.109 | 97.59% |
 | MLP | PyTorch + CUDA Graph | 0.060 | 97.61% |
 | MLP | PyTorch eager | 0.537 | 97.61% |
 | MLP | PyTorch torch.compile（default） | 0.795 | 97.60% |
 | MLP | PyTorch torch.compile（reduce-overhead） | 0.693 | 97.60% |
-| CNN | **TinyTensor + CUDA Graph** | **0.197** | 98.88% |
-| CNN | TinyTensor 逐算子 | 0.212 | 98.87% |
+| CNN | **Tiny PyTorch + CUDA Graph** | **0.197** | 98.88% |
+| CNN | Tiny PyTorch 逐算子 | 0.212 | 98.87% |
 | CNN | PyTorch + CUDA Graph | 0.219 | 98.74% |
 | CNN | PyTorch eager | 0.901 | 98.80% |
 | CNN | PyTorch torch.compile（default） | 1.079 | 98.79% |
@@ -239,13 +239,13 @@ s/epoch 是第 2-10 个 epoch 的平均值，因为第 1 个 epoch 包含 CUDA G
 
 这张表用本仓库现在的包测得（commit `08e4993`，PyTorch 2.11，CUDA 13），测之前 `tests/test_ops.py` 和
 `tests/test_nn_ops.py` 在同一台机器上通过。同一个作业里把十二种配置又跑了一遍，每一项耗时都在 5% 以内重现
-（TinyTensor 为 0.041 / 0.107 / 0.197 / 0.212 s/epoch）。TinyTensor + CUDA Graph 在两个模型上都是最快的配置：比
+（Tiny PyTorch 为 0.041 / 0.107 / 0.197 / 0.212 s/epoch）。Tiny PyTorch + CUDA Graph 在两个模型上都是最快的配置：比
 PyTorch + CUDA Graph 在 MLP 上快 1.5 倍，在 CNN 上快 1.1 倍。
 
 ![mnist a100](results/mnist/compare_a100.png)
 
 两个框架从相同的初始化和相同的数据顺序出发，所以准确率曲线重合。各次运行之间的小差异，来自权重梯度归约里浮点
-`atomicAdd` 的顺序（TinyTensor）和 cuDNN 的算法选择（PyTorch）。
+`atomicAdd` 的顺序（Tiny PyTorch）和 cuDNN 的算法选择（PyTorch）。
 
 PyTorch 一侧有一个限制：对 MLP，把 99 个或更多训练步录进一个 `torch.cuda.CUDAGraph`，回放时会报
 `CUDA error: unspecified launch failure`（A100 上的 PyTorch 2.11）。50 步及以下可以正常工作，而且每个 graph 录 1、
@@ -268,7 +268,7 @@ PyTorch 一侧有一个限制：对 MLP，把 99 个或更多训练步录进一�
 
 每个训练步的 kernel 数：
 
-| 模型 | TinyTensor | PyTorch + CUDA Graph |
+| 模型 | Tiny PyTorch | PyTorch + CUDA Graph |
 |---|---|---|
 | CNN | 20 | 45 |
 | MLP | 12 | 25 |
@@ -322,15 +322,15 @@ ImageNet-1k（1000 类，128 万张训练图像，5 万张验证图像）训练�
   - 正则化（四个网络都用）：标签平滑 0.1，Mixup 和 CutMix（每一步等概率选其中一个）。两个框架的实现完全一致，
     使用相同的逐步随机数。
 - **相同的起点：**
-  - TinyTensor 初始化权重并导出；PyTorch 读取这个文件。
+  - Tiny PyTorch 初始化权重并导出；PyTorch 读取这个文件。
   - 两者使用相同的打乱顺序和相同的数据增强种子。
   - `tests/test_imagenet_match.py` 检查两个框架的前几步是否一致。第 0-2 步 loss 的相对差在 fp32 下达到 1e-4 或在
     bf16 下达到 1e-2 时，测试失败。
 - **精度：**
   - bf16 是混合精度。PyTorch 使用 `torch.autocast` 加 channels_last。
-  - TinyTensor 保留 fp32 的主权重和 fp32 的 BN/LN 统计量。卷积和矩阵乘在 bf16 tensor core 上运行（`mma.sync`）。
+  - Tiny PyTorch 保留 fp32 的主权重和 fp32 的 BN/LN 统计量。卷积和矩阵乘在 bf16 tensor core 上运行（`mma.sync`）。
 - **计时：** 只在每个计时区间的开头和结尾同步 GPU。loss 和准确率在 GPU 上累加，每个 epoch 读回一次。
-- **比较的对象：** TinyTensor（CUDA Graph）跑完整个训练计划。PyTorch 跑相同的计划，但在第 10 个 epoch 后停止
+- **比较的对象：** Tiny PyTorch（CUDA Graph）跑完整个训练计划。PyTorch 跑相同的计划，但在第 10 个 epoch 后停止
   （`--stop-epoch 10`），分别用 eager 模式和 `torch.compile`（default 模式），这样前 10 个 epoch 可以逐个 epoch 对比
   两个框架。ViT-Tiny 只与 `torch.compile` 对比。
 
@@ -338,7 +338,7 @@ ImageNet-1k（1000 类，128 万张训练图像，5 万张验证图像）训练�
 
 每个 epoch 的时间取第 2 个及之后各 epoch 的中位数。它只包含这个 epoch 的训练步，验证过程不计时。
 
-| 网络 | TinyTensor | PyTorch eager | PyTorch torch.compile | TinyTensor 对比 torch.compile | TinyTensor 最终 top-1 |
+| 网络 | Tiny PyTorch | PyTorch eager | PyTorch torch.compile | Tiny PyTorch 对比 torch.compile | Tiny PyTorch 最终 top-1 |
 |---|---|---|---|---|---|
 | ViT-Tiny | **77.4 s** | - | 198.0 s | 快 2.56 倍 | 56.54%（100 个 epoch） |
 | ResNet18 | **74.9 s** | 144.7 s | 104.2 s | 快 1.39 倍 | 56.00%（60 个 epoch） |
@@ -350,14 +350,14 @@ torch.compile 的第一个 epoch 还要付出编译的时间：236 s（ViT-Tiny�
 
 按相同的计划训练 10 个 epoch 之后，两个框架处在同一个位置：
 
-| 网络 | 第 10 个 epoch 的训练 loss：TinyTensor / eager / compile | 第 10 个 epoch 的验证 top-1：TinyTensor / eager / compile |
+| 网络 | 第 10 个 epoch 的训练 loss：Tiny PyTorch / eager / compile | 第 10 个 epoch 的验证 top-1：Tiny PyTorch / eager / compile |
 |---|---|---|
 | ViT-Tiny | 5.1562 / - / 5.1573 | 29.41% / - / 29.52% |
 | ResNet18 | 4.8094 / 4.8103 / 4.8113 | 35.37% / 36.16% / 35.31% |
 | ResNeXt26 | 4.6147 / 4.6147 / 4.6149 | 40.81% / 40.42% / 40.55% |
 | VGG16 | 4.8095 / 4.8099 / 4.8105 | 35.45% / 35.55% / 35.44% |
 
-验证集 top-1。上排：前 10 个 epoch，三种配置使用同一个训练计划。下排：TinyTensor 的完整训练。
+验证集 top-1。上排：前 10 个 epoch，三种配置使用同一个训练计划。下排：Tiny PyTorch 的完整训练。
 
 ![imagenet64 training](results/imagenet64_a100_training.png)
 
@@ -369,21 +369,21 @@ torch.compile 的第一个 epoch 还要付出编译的时间：236 s（ViT-Tiny�
 
 - **两个框架的准确率相同。** 第 10 个 epoch 的训练 loss 一致到第四位有效数字。验证准确率相差不到一个百分点，这是
   bf16 舍入带来的运行间噪声。
-- **TinyTensor 在 ViT-Tiny 和 ResNet18 上明显更快。**
-- **TinyTensor 在 ResNeXt26 上与 torch.compile 持平，在 VGG16 上落后。** VGG16 是宽 3x3 卷积的简单堆叠，时间几乎
-  全花在卷积 kernel 上，而 cuDNN 的卷积比 TinyTensor 的 `ConvTc` 快（见下面的吞吐表）。这是目前最主要的待解决的
+- **Tiny PyTorch 在 ViT-Tiny 和 ResNet18 上明显更快。**
+- **Tiny PyTorch 在 ResNeXt26 上与 torch.compile 持平，在 VGG16 上落后。** VGG16 是宽 3x3 卷积的简单堆叠，时间几乎
+  全花在卷积 kernel 上，而 cuDNN 的卷积比 Tiny PyTorch 的 `ConvTc` 快（见下面的吞吐表）。这是目前最主要的待解决的
   速度问题。
-- **batch 128 对 TinyTensor 有利。** 在这个 batch 和图像尺寸下，PyTorch 的一步足够短，发射它的 CPU 开销有影响，而
-  TinyTensor 回放的是 CUDA Graph。在下面 batch 256 的吞吐表里，GPU kernel 占主导，torch.compile 在三个 CNN 上都
+- **batch 128 对 Tiny PyTorch 有利。** 在这个 batch 和图像尺寸下，PyTorch 的一步足够短，发射它的 CPU 开销有影响，而
+  Tiny PyTorch 回放的是 CUDA Graph。在下面 batch 256 的吞吐表里，GPU kernel 占主导，torch.compile 在三个 CNN 上都
   领先。这些训练里没有测 PyTorch 加手动 CUDA Graph 或 `reduce-overhead`。
 - **四条准确率曲线在最后一个 epoch 都还在上升。** 对 ImageNet 来说这些训练计划偏短。
 
-TinyTensor 完整训练的墙钟时间：ResNet18 1 小时 17 分，VGG16 1 小时 51 分，ResNeXt26 2 小时 32 分，ViT-Tiny 2 小时
+Tiny PyTorch 完整训练的墙钟时间：ResNet18 1 小时 17 分，VGG16 1 小时 51 分，ResNeXt26 2 小时 32 分，ViT-Tiny 2 小时
 12 分。原始结果：`results/imagenet64_a100/*.json`；图：`results/plot_imagenet64.py`。
 
 ### CNN 超参数的选择
 
-ResNet18，TinyTensor，ImageNet64，验证集 top-1：
+ResNet18，Tiny PyTorch，ImageNet64，验证集 top-1：
 
 | 学习率 | 权重衰减 | 正则化 | epoch 数 | 验证 top-1 |
 |---|---|---|---|---|
@@ -412,15 +412,15 @@ python ../../tests/test_imagenet_match.py --arch vit_tiny --dtype bf16   # 前�
 python profile_imagenet.py --framework tiny --arch resnext26 --dtype bf16      # 每个 kernel 的 GPU 时间
 ```
 
-先运行 TinyTensor 的脚本：它导出 PyTorch 脚本要读取的初始权重。结果写到 `results/runs/imagenet/`。
+先运行 Tiny PyTorch 的脚本：它导出 PyTorch 脚本要读取的初始权重。结果写到 `results/runs/imagenet/`。
 
 ## batch 256 下的吞吐（A100，每步毫秒数，越低越好）
 
 用 `--bench 50 --batch 256 --train-limit 51200` 在 Tiny ImageNet（同样是 64x64 输入，200 类）上测得，不加正则化。
-PyTorch 的各列和 TinyTensor eager 一列在同一个会话里测得；TinyTensor + CUDA Graph 一列来自之后的会话，那时 kernel
+PyTorch 的各列和 Tiny PyTorch eager 一列在同一个会话里测得；Tiny PyTorch + CUDA Graph 一列来自之后的会话，那时 kernel
 又做了一些优化（见下面的记录）。
 
-| 网络 | dtype | TinyTensor + CUDA Graph | TinyTensor eager | PyTorch eager | PyTorch + CUDA Graph | PyTorch torch.compile（最快的模式） |
+| 网络 | dtype | Tiny PyTorch + CUDA Graph | Tiny PyTorch eager | PyTorch eager | PyTorch + CUDA Graph | PyTorch torch.compile（最快的模式） |
 |---|---|---|---|---|---|---|
 | VGG16 | bf16 | 19.3 | 21.6 | 18.7 | 18.2 | **14.2** |
 | ResNet18 | bf16 | 12.6 | 13.6 | 13.4 | 12.6 | **10.0** |
@@ -438,26 +438,26 @@ PyTorch 的三种模式：
 - **torch.compile：** Dynamo 捕获计算图，Inductor 把逐元素算子和归约融合成 Triton kernel。卷积和 GEMM 仍然交给
   cuDNN / cuBLAS。表里取 `default` 和 `max-autotune-no-cudagraphs` 中较快的一个。
 
-TinyTensor 没有编译器。它的融合是手写的，CUDA Graph 也是显式录制的。因此与它对等的是 torch.compile，主要的比较
+Tiny PyTorch 没有编译器。它的融合是手写的，CUDA Graph 也是显式录制的。因此与它对等的是 torch.compile，主要的比较
 对象是 PyTorch 最快的模式。
 
-TinyTensor 在 batch 256 下的位置：
+Tiny PyTorch 在 batch 256 下的位置：
 
-- **ViT-Tiny，bf16：TinyTensor 最快，比 torch.compile 快 1.4 倍。**
+- **ViT-Tiny，bf16：Tiny PyTorch 最快，比 torch.compile 快 1.4 倍。**
   - 一个 kernel 在共享内存里算完一个 (batch, head) 的整个注意力：Q·Kᵀ、softmax，再乘 V。
   - LayerNorm 只扫一遍。
   - 偏置 + GELU 融合进 GEMM 的 epilogue。
 - **CNN，bf16：与 PyTorch eager 和 CUDA Graph 大致相同，但比 torch.compile 慢 1.25-1.45 倍。**
-  - 剩下的差距在卷积：cuDNN 的 implicit-GEMM kernel 仍然比 TinyTensor 的 `ConvTc` 快。
-  - 例如 VGG 里一个 64 通道的层：前向 0.22 ms（cuDNN）对 0.36 ms（TinyTensor）；权重梯度 0.36 ms 对 0.61 ms。
+  - 剩下的差距在卷积：cuDNN 的 implicit-GEMM kernel 仍然比 Tiny PyTorch 的 `ConvTc` 快。
+  - 例如 VGG 里一个 64 通道的层：前向 0.22 ms（cuDNN）对 0.36 ms（Tiny PyTorch）；权重梯度 0.36 ms 对 0.61 ms。
 - **CNN，fp32：更慢，ResNeXt26 除外。**
   - 在 fp32 下，cuDNN 换用 Winograd（`scudnn_winograd_128x128`）和 FFT（`fft2d_r2c`、`gcgemm`）卷积。它们的浮点
     运算量比 implicit GEMM 少得多。
-  - TinyTensor 的 fp32 卷积是 CUDA core 上普通的 implicit GEMM。
-  - ResNeXt26 以分组卷积为主，cuDNN 在这里没有这样的捷径，TinyTensor 的直接分组卷积 kernel 更快。
+  - Tiny PyTorch 的 fp32 卷积是 CUDA core 上普通的 implicit GEMM。
+  - ResNeXt26 以分组卷积为主，cuDNN 在这里没有这样的捷径，Tiny PyTorch 的直接分组卷积 kernel 更快。
 
 ```bash
-python imagenet_train.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200          # TinyTensor
+python imagenet_train.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200          # Tiny PyTorch
 python torch_imagenet.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200 --graph
 python torch_imagenet.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200 --compile default
 python imagenet_train.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200 --no-fuse
@@ -524,9 +524,9 @@ BatchNorm 融合进卷积的 epilogue。
 ### 更早的一组实验：Tiny ImageNet，30 个 epoch
 
 在 ImageNet64 之前，四个网络在同一张 A100 上用 Tiny ImageNet（200 类，10 万张训练图像）训练了 30 个 epoch，不加
-正则化（CNN 的权重衰减为 5e-4）。TinyTensor 用 CUDA Graph，PyTorch 用 eager，验证集 top-1：
+正则化（CNN 的权重衰减为 5e-4）。Tiny PyTorch 用 CUDA Graph，PyTorch 用 eager，验证集 top-1：
 
-| 网络 | dtype | TinyTensor | PyTorch |
+| 网络 | dtype | Tiny PyTorch | PyTorch |
 |---|---|---|---|
 | VGG16 | bf16 | 58.56% | 59.66% |
 | ResNet18 | bf16 | 59.74% | 59.96% |
