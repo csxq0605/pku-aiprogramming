@@ -138,6 +138,18 @@ def test_view_and_reshape_on_gpu():
         close(gx, R.reshape(x.shape))
 
 
+def test_summation_negative_axes():
+    x = rng.standard_normal((2, 3, 4)).astype(np.float32)
+    for axes in ((2,), (-1,), -1, (-2,), (0, -1), None):
+        X = tt.Tensor(x)
+        out = tt.summation(X, axes=axes)
+        ref = x.sum(axis=axes)
+        close(out.numpy(), ref)
+        R = np.asarray(rng.standard_normal(np.shape(ref)))
+        gx, = grads_of(out, R, [X])
+        close(gx, np.broadcast_to(R if axes is None else np.expand_dims(R, axes), x.shape))
+
+
 def test_optimizers_match_numpy():
     for reference, make in ((SGD(0.1), lambda p: optim.SGD(p, lr=0.1)), (Adam(0.01), lambda p: optim.Adam(p, lr=0.01))):
         p_np = rng.standard_normal((5, 7)).astype(np.float32)

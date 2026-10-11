@@ -484,6 +484,7 @@ class Summation(TensorOp):
             axes = tuple(range(len(input_shape)))
         else:
             axes = tuple(axes) if isinstance(axes, (list, tuple)) else (axes,)
+            axes = tuple(a % len(input_shape) for a in axes)
         grad_shape = [1 if i in axes else input_shape[i] for i in range(len(input_shape))]
         return broadcast_to(reshape(out_grad, grad_shape), input_shape)
         
