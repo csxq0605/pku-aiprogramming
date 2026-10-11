@@ -195,28 +195,28 @@ TinyTensor 的脚本。
 
 s/epoch 是第 2-10 个 epoch 的平均值，因为第 1 个 epoch 包含 CUDA Graph 录制或 torch.compile 的编译时间。
 
-**框架之间的对比请以 A100 的表为准。** 笔记本的 GPU 功率状态不稳定，它的计时不能可靠地给框架排名；保留笔记本的表
-只是为了说明所有代码都能在本地运行并达到相同的准确率。
+**框架之间的对比请以 A100 的表为准。** 笔记本的 GPU 功率状态取决于 Windows 的电源模式，它的计时只能在同一次连续
+运行内相互比较。笔记本的表是在电源模式设为"性能"时测的。
 
 **RTX 4060 Laptop，WSL2**（`results/mnist/rtx4060/`）：
 
 | 模型 | 模式 | s/epoch | 测试准确率 |
 |---|---|---|---|
-| MLP | **TinyTensor + CUDA Graph** | **0.058** | 97.59% |
-| MLP | TinyTensor 逐算子 | 0.108 | 97.59% |
-| MLP | PyTorch + CUDA Graph | 0.093 | 97.61% |
-| MLP | PyTorch eager | 0.406 | 97.61% |
-| MLP | PyTorch torch.compile（default） | 0.500 | 97.61% |
-| MLP | PyTorch torch.compile（reduce-overhead） | 0.508 | 97.61% |
-| CNN | TinyTensor + CUDA Graph | 0.778 | 98.90% |
-| CNN | TinyTensor 逐算子 | 0.708 | 98.86% |
-| CNN | PyTorch + CUDA Graph | 0.874 | 98.80% |
-| CNN | PyTorch eager | 0.945 | 98.79% |
-| CNN | PyTorch torch.compile（default） | 0.800 | 98.86% |
-| CNN | **PyTorch torch.compile（reduce-overhead）** | **0.697** | 98.86% |
+| MLP | **TinyTensor + CUDA Graph** | **0.032** | 97.59% |
+| MLP | TinyTensor 逐算子 | 0.074 | 97.59% |
+| MLP | PyTorch + CUDA Graph | 0.047 | 97.61% |
+| MLP | PyTorch eager | 0.327 | 97.61% |
+| MLP | PyTorch torch.compile（default） | 0.447 | 97.61% |
+| MLP | PyTorch torch.compile（reduce-overhead） | 0.429 | 97.61% |
+| CNN | **TinyTensor + CUDA Graph** | **0.286** | 98.86% |
+| CNN | TinyTensor 逐算子 | 0.322 | 98.91% |
+| CNN | PyTorch + CUDA Graph | 0.353 | 98.86% |
+| CNN | PyTorch eager | 0.656 | 98.74% |
+| CNN | PyTorch torch.compile（default） | 0.647 | 98.78% |
+| CNN | PyTorch torch.compile（reduce-overhead） | 0.459 | 98.83% |
 
-这次运行时笔记本把 GPU 限制在 45-49 W（见下文"笔记本上的 GPU 利用率"），这种状态下 CNN 的计时噪声很大。MLP 上
-TinyTensor + CUDA Graph 是最快的配置；CNN 上这次最快的是 PyTorch 的 `reduce-overhead`，TinyTensor 第二。
+两个模型上最快的配置都是 TinyTensor + CUDA Graph：MLP 上比 PyTorch 加手动 CUDA Graph 快 1.5 倍，CNN 上快 1.2 倍。
+排名与 A100 上一致。
 
 ![mnist rtx4060](results/mnist/compare_rtx4060.png)
 
@@ -295,8 +295,8 @@ eager 慢，在 CNN 上比 eager 快 1.2 倍。两者都远不及手动录制的
   个 kernel 减到 28 再减到 20 的原因：融合 kernel、用一个 kernel 完成取 batch 和推进计数器、把权重梯度的 memset 并入
   池化的反向，以及把 cuBLAS 的 workspace 设为 0（这会关掉 split-K 和它多出来的 `splitKreduce` kernel；
   `TT_CUBLAS_WS=<bytes>` 可以重新打开）。
-- **这台笔记本的时钟频率不稳定。** 在 Windows 的"平衡"电源计划下，驱动把显卡限制在约 40 W，同样的代码在限功率期间
-  最多慢 1.7 倍。框架之间只能在同一次连续运行里比较，`bench.sh` 就是这样做的。
+- **这台笔记本的时钟频率取决于电源模式。** 在 Windows 的"平衡"电源模式下，驱动把显卡限制在 40-49 W，同一个基准
+  测试最多比"性能"模式下慢 2.7 倍。框架之间只能在同一次连续运行里比较，`bench.sh` 就是这样做的。
 
 # 第二部分：拓展
 
@@ -357,7 +357,13 @@ torch.compile 的第一个 epoch 还要付出编译的时间：236 s（ViT-Tiny�
 | ResNeXt26 | 4.6147 / 4.6147 / 4.6149 | 40.81% / 40.42% / 40.55% |
 | VGG16 | 4.8095 / 4.8099 / 4.8105 | 35.45% / 35.55% / 35.44% |
 
-![imagenet64](results/imagenet64_a100.png)
+验证集 top-1。上排：前 10 个 epoch，三种配置使用同一个训练计划。下排：TinyTensor 的完整训练。
+
+![imagenet64 training](results/imagenet64_a100_training.png)
+
+每个 epoch 的时间：
+
+![imagenet64 time](results/imagenet64_a100_time.png)
 
 这些数字说明：
 

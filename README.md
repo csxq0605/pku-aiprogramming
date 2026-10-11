@@ -201,30 +201,29 @@ training loop around them. TinyTensor initializes the weights itself: Kaiming un
 
 s/epoch is the mean of epochs 2-10, because epoch 1 includes CUDA Graph capture or torch.compile compilation.
 
-**The framework comparison should be read from the A100 table.** The laptop does not hold a steady GPU power state,
-so its timings are not a reliable basis for ranking the frameworks; the laptop table is kept only to show that
-everything runs locally and reaches the same accuracy.
+**The framework comparison should be read from the A100 table.** The laptop's GPU power state depends on the
+Windows power mode, so its timings are only comparable within one back-to-back run. The laptop table was measured
+with the power mode set to performance.
 
 **RTX 4060 Laptop, WSL2** (`results/mnist/rtx4060/`):
 
 | Model | Mode | s/epoch | Test acc |
 |---|---|---|---|
-| MLP | **TinyTensor + CUDA Graph** | **0.058** | 97.59% |
-| MLP | TinyTensor op-by-op | 0.108 | 97.59% |
-| MLP | PyTorch + CUDA Graph | 0.093 | 97.61% |
-| MLP | PyTorch eager | 0.406 | 97.61% |
-| MLP | PyTorch torch.compile (default) | 0.500 | 97.61% |
-| MLP | PyTorch torch.compile (reduce-overhead) | 0.508 | 97.61% |
-| CNN | TinyTensor + CUDA Graph | 0.778 | 98.90% |
-| CNN | TinyTensor op-by-op | 0.708 | 98.86% |
-| CNN | PyTorch + CUDA Graph | 0.874 | 98.80% |
-| CNN | PyTorch eager | 0.945 | 98.79% |
-| CNN | PyTorch torch.compile (default) | 0.800 | 98.86% |
-| CNN | **PyTorch torch.compile (reduce-overhead)** | **0.697** | 98.86% |
+| MLP | **TinyTensor + CUDA Graph** | **0.032** | 97.59% |
+| MLP | TinyTensor op-by-op | 0.074 | 97.59% |
+| MLP | PyTorch + CUDA Graph | 0.047 | 97.61% |
+| MLP | PyTorch eager | 0.327 | 97.61% |
+| MLP | PyTorch torch.compile (default) | 0.447 | 97.61% |
+| MLP | PyTorch torch.compile (reduce-overhead) | 0.429 | 97.61% |
+| CNN | **TinyTensor + CUDA Graph** | **0.286** | 98.86% |
+| CNN | TinyTensor op-by-op | 0.322 | 98.91% |
+| CNN | PyTorch + CUDA Graph | 0.353 | 98.86% |
+| CNN | PyTorch eager | 0.656 | 98.74% |
+| CNN | PyTorch torch.compile (default) | 0.647 | 98.78% |
+| CNN | PyTorch torch.compile (reduce-overhead) | 0.459 | 98.83% |
 
-This run was made while the laptop held the GPU at 45-49 W (see "GPU utilization on the laptop" below), and the CNN
-timings are noisy in that state. On the MLP TinyTensor with CUDA Graph is the fastest configuration; on the CNN
-PyTorch with `reduce-overhead` is the fastest here and TinyTensor is second.
+TinyTensor with CUDA Graph is the fastest configuration for both models: 1.5x faster than PyTorch with a manual CUDA
+Graph on the MLP and 1.2x faster on the CNN. The ranking is the same as on the A100.
 
 ![mnist rtx4060](results/mnist/compare_rtx4060.png)
 
@@ -310,9 +309,9 @@ These observations come from `profile_step.py` (CUPTI timeline, no extra synchro
   time directly. That is why the CNN step went from 50 to 28 to 20 kernels: the fused kernels, one kernel for the
   batch gather and the counter, the weight-gradient memset folded into the pool backward, and a cuBLAS workspace of 0
   (which disables split-K and its extra `splitKreduce` kernels; `TT_CUBLAS_WS=<bytes>` re-enables it).
-- **Clocks are not stable on this laptop.** Under the Windows "Balanced" power plan the driver holds the card at
-  about 40 W, and the same code measured up to 1.7x slower during a power-capped period. Compare frameworks only
-  within one back-to-back run, as `bench.sh` does.
+- **Clocks depend on the power mode on this laptop.** Under the Windows "Balanced" power mode the driver holds the
+  card at 40-49 W, and the same benchmark measured up to 2.7x slower than in performance mode. Compare frameworks
+  only within one back-to-back run, as `bench.sh` does.
 
 # Part II: extensions
 
@@ -377,7 +376,14 @@ After 10 epochs of the same schedule, the two frameworks are at the same point:
 | ResNeXt26 | 4.6147 / 4.6147 / 4.6149 | 40.81% / 40.42% / 40.55% |
 | VGG16 | 4.8095 / 4.8099 / 4.8105 | 35.45% / 35.55% / 35.44% |
 
-![imagenet64](results/imagenet64_a100.png)
+Validation top-1. Top row: the first 10 epochs, all three configurations on the same schedule. Bottom row: the full
+TinyTensor runs.
+
+![imagenet64 training](results/imagenet64_a100_training.png)
+
+Time per epoch:
+
+![imagenet64 time](results/imagenet64_a100_time.png)
 
 What the numbers say:
 
@@ -394,7 +400,7 @@ What the numbers say:
 - **All four accuracy curves are still rising at the last epoch.** The schedules are short for ImageNet.
 
 Wall time of the full TinyTensor runs: ResNet18 1 h 17 min, VGG16 1 h 51 min, ResNeXt26 2 h 32 min, ViT-Tiny
-2 h 12 min. Raw results: `results/imagenet64_a100/*.json`; chart: `results/plot_imagenet64.py`.
+2 h 12 min. Raw results: `results/imagenet64_a100/*.json`; charts: `results/plot_imagenet64.py`.
 
 ### Choosing the CNN hyperparameters
 
