@@ -4,7 +4,7 @@
 
 Homework for course Programming in Artificial Intelligence, Peking University, Fall 2024, and what grew out of it.
 
-The course work builds a small deep-learning framework, **TinyTensor**, step by step: a CUDA tensor class, layers,
+The course work builds a small deep-learning framework, **Tiny PyTorch**, step by step: a CUDA tensor class, layers,
 Python bindings, automatic differentiation, optimizers, and finally MNIST training. That is **Part I (basics)**.
 **Part II (extensions)** pushes the same framework much further: tensor-core convolutions, BatchNorm, attention,
 bf16 mixed precision, CUDA Graphs and hand-fused kernels, enough to train VGG16, ResNet18, ResNeXt26 and ViT-Tiny on
@@ -39,7 +39,7 @@ results/                 raw json of every number in this README, plus the plott
 
 ## The package
 
-TinyTensor is used the way PyTorch is:
+Tiny PyTorch is used the way PyTorch is:
 
 ```python
 import tinytensor as tt
@@ -101,7 +101,7 @@ How the pieces divide the work:
   `channels_last`, and `F.conv_relu_max_pool2d` only in `contiguous_format`. An operator raises
   `NotImplementedError` when its family has no kernel for the request.
 
-Where TinyTensor deliberately differs from PyTorch:
+Where Tiny PyTorch deliberately differs from PyTorch:
 
 - **Parameters are created lazily.** A layer only declares shapes and initializers; the values are generated on the
   GPU at the first use of the model, so `model.to(memory_format=...)` and `model.manual_seed(seed)` can come first.
@@ -136,7 +136,7 @@ python3.12 -m venv ~/tt-venv
 ~/tt-venv/bin/pip install numpy pybind11 pytest matplotlib torch torchvision --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Build TinyTensor from the repository root. The script needs only nvcc, numpy and the pybind11 headers. It compiles
+Build Tiny PyTorch from the repository root. The script needs only nvcc, numpy and the pybind11 headers. It compiles
 `tinytensor/csrc` and writes the extension modules `myTensor`, `myLayer` and `myNN` into `tinytensor/_C/`:
 
 ```bash
@@ -165,7 +165,7 @@ to run it. Every item runs locally (RTX 4060 Laptop, WSL2, the environment above
 | Task 2 | the same CNN with `nn.DataParallel` (one GPU, so this measures overhead) | plain 98.64% in 104.7 s; `nn.DataParallel` 98.66% in 105.2 s |
 | Task 3 | train on MNIST with the hand-written framework | the next section |
 
-## Task 3: TinyTensor on MNIST
+## Task 3: Tiny PyTorch on MNIST
 
 An MLP (784-100-10) and a CNN (two 3x3 conv + ReLU + 2x2 max-pool stages with
 16 and 32 channels, then a 128-unit hidden layer) are trained for 10 epochs with SGD, lr 0.1, batch 100, seed 0.
@@ -175,8 +175,8 @@ Run inside `experiments/mnist`:
 
 ```bash
 python ../../tests/test_ops.py          # operator checks, CNN finite differences, fused == unfused, CUDA Graph == eager
-python mnist_mlp.py --epochs 10         # TinyTensor MLP (CUDA Graph by default, --no-graph for op-by-op)
-python mnist_cnn.py --epochs 10         # TinyTensor CNN
+python mnist_mlp.py --epochs 10         # Tiny PyTorch MLP (CUDA Graph by default, --no-graph for op-by-op)
+python mnist_cnn.py --epochs 10         # Tiny PyTorch CNN
 python torch_baseline.py --arch cnn     # same model / init / data order in PyTorch (eager)
 python torch_baseline.py --arch cnn --graph                     # PyTorch + manual CUDA Graph
 python torch_baseline.py --arch cnn --compile reduce-overhead   # PyTorch + torch.compile (also: default)
@@ -193,9 +193,9 @@ python ../../results/mnist/plot_results.py rtx4060
 ```
 
 The models are `tinytensor.models.MLP` and `tinytensor.models.CNN`; `experiments/mnist/tiny_trainer.py` is the
-training loop around them. TinyTensor initializes the weights itself: Kaiming uniform from the CUDA `random` kernel
-(`nn.init.kaiming_uniform_`). The TinyTensor scripts export the initial weights to `results/mnist/init/<arch>_seed<seed>.npz`, and
-`torch_baseline.py` loads the same file. Run the TinyTensor script first.
+training loop around them. Tiny PyTorch initializes the weights itself: Kaiming uniform from the CUDA `random` kernel
+(`nn.init.kaiming_uniform_`). The Tiny PyTorch scripts export the initial weights to `results/mnist/init/<arch>_seed<seed>.npz`, and
+`torch_baseline.py` loads the same file. Run the Tiny PyTorch script first.
 
 ### Results
 
@@ -209,20 +209,20 @@ with the power mode set to performance.
 
 | Model | Mode | s/epoch | Test acc |
 |---|---|---|---|
-| MLP | **TinyTensor + CUDA Graph** | **0.032** | 97.59% |
-| MLP | TinyTensor op-by-op | 0.074 | 97.59% |
+| MLP | **Tiny PyTorch + CUDA Graph** | **0.032** | 97.59% |
+| MLP | Tiny PyTorch op-by-op | 0.074 | 97.59% |
 | MLP | PyTorch + CUDA Graph | 0.047 | 97.61% |
 | MLP | PyTorch eager | 0.327 | 97.61% |
 | MLP | PyTorch torch.compile (default) | 0.447 | 97.61% |
 | MLP | PyTorch torch.compile (reduce-overhead) | 0.429 | 97.61% |
-| CNN | **TinyTensor + CUDA Graph** | **0.286** | 98.86% |
-| CNN | TinyTensor op-by-op | 0.322 | 98.91% |
+| CNN | **Tiny PyTorch + CUDA Graph** | **0.286** | 98.86% |
+| CNN | Tiny PyTorch op-by-op | 0.322 | 98.91% |
 | CNN | PyTorch + CUDA Graph | 0.353 | 98.86% |
 | CNN | PyTorch eager | 0.656 | 98.74% |
 | CNN | PyTorch torch.compile (default) | 0.647 | 98.78% |
 | CNN | PyTorch torch.compile (reduce-overhead) | 0.459 | 98.83% |
 
-TinyTensor with CUDA Graph is the fastest configuration for both models: 1.5x faster than PyTorch with a manual CUDA
+Tiny PyTorch with CUDA Graph is the fastest configuration for both models: 1.5x faster than PyTorch with a manual CUDA
 Graph on the MLP and 1.2x faster on the CNN. The ranking is the same as on the A100.
 
 ![mnist rtx4060](results/mnist/compare_rtx4060.png)
@@ -231,14 +231,14 @@ Graph on the MLP and 1.2x faster on the CNN. The ranking is the same as on the A
 
 | Model | Mode | s/epoch | Test acc |
 |---|---|---|---|
-| MLP | **TinyTensor + CUDA Graph** | **0.040** | 97.59% |
-| MLP | TinyTensor op-by-op | 0.109 | 97.59% |
+| MLP | **Tiny PyTorch + CUDA Graph** | **0.040** | 97.59% |
+| MLP | Tiny PyTorch op-by-op | 0.109 | 97.59% |
 | MLP | PyTorch + CUDA Graph | 0.060 | 97.61% |
 | MLP | PyTorch eager | 0.537 | 97.61% |
 | MLP | PyTorch torch.compile (default) | 0.795 | 97.60% |
 | MLP | PyTorch torch.compile (reduce-overhead) | 0.693 | 97.60% |
-| CNN | **TinyTensor + CUDA Graph** | **0.197** | 98.88% |
-| CNN | TinyTensor op-by-op | 0.212 | 98.87% |
+| CNN | **Tiny PyTorch + CUDA Graph** | **0.197** | 98.88% |
+| CNN | Tiny PyTorch op-by-op | 0.212 | 98.87% |
 | CNN | PyTorch + CUDA Graph | 0.219 | 98.74% |
 | CNN | PyTorch eager | 0.901 | 98.80% |
 | CNN | PyTorch torch.compile (default) | 1.079 | 98.79% |
@@ -246,14 +246,14 @@ Graph on the MLP and 1.2x faster on the CNN. The ranking is the same as on the A
 
 This table was measured with the package as it is in this repository (commit `08e4993`, PyTorch 2.11, CUDA 13), after
 `tests/test_ops.py` and `tests/test_nn_ops.py` passed on the same machine. A second pass of the twelve configurations
-in the same job reproduced every time to within 5% (TinyTensor 0.041 / 0.107 / 0.197 / 0.212 s/epoch). TinyTensor
+in the same job reproduced every time to within 5% (Tiny PyTorch 0.041 / 0.107 / 0.197 / 0.212 s/epoch). Tiny PyTorch
 with CUDA Graph is the fastest configuration for both models: 1.5x faster than PyTorch with CUDA Graph on the MLP and
 1.1x on the CNN.
 
 ![mnist a100](results/mnist/compare_a100.png)
 
 Both frameworks start from the same init and the same data order, so their accuracy curves overlap. The small
-differences between runs come from the order of float `atomicAdd`s in the weight-gradient reductions (TinyTensor) and
+differences between runs come from the order of float `atomicAdd`s in the weight-gradient reductions (Tiny PyTorch) and
 from cuDNN's algorithm choice (PyTorch).
 
 One PyTorch-side limitation: for the MLP, capturing 99 or more training steps into one `torch.cuda.CUDAGraph` fails
@@ -280,7 +280,7 @@ found.
 
 Kernels per training step:
 
-| Model | TinyTensor | PyTorch + CUDA Graph |
+| Model | Tiny PyTorch | PyTorch + CUDA Graph |
 |---|---|---|
 | CNN | 20 | 45 |
 | MLP | 12 | 25 |
@@ -338,17 +338,17 @@ downsampled to 64x64 (1000 classes, 1.28 M training images, 50k validation image
   - Regularization, all four networks: label smoothing 0.1, Mixup and CutMix (each step uses one of the two with
     equal probability). Both frameworks implement them identically, from the same per-step random numbers.
 - **Same starting point:**
-  - TinyTensor initializes the weights and exports them; PyTorch loads that file.
+  - Tiny PyTorch initializes the weights and exports them; PyTorch loads that file.
   - Both use the same shuffled order and the same augmentation seeds.
   - `tests/test_imagenet_match.py` checks that the first steps of the two frameworks agree. The test
     fails if the relative loss difference in steps 0-2 reaches 1e-4 in fp32 or 1e-2 in bf16.
 - **Precision:**
   - bf16 is mixed precision. PyTorch uses `torch.autocast` with channels_last.
-  - TinyTensor keeps fp32 master weights and fp32 BN/LN statistics. Convolutions and matmuls run on bf16 tensor cores
+  - Tiny PyTorch keeps fp32 master weights and fp32 BN/LN statistics. Convolutions and matmuls run on bf16 tensor cores
     (`mma.sync`).
 - **Timing:** the GPU is synchronized only at the start and end of each timed region. Loss and accuracy are
   accumulated on the GPU and read back once per epoch.
-- **What is compared:** TinyTensor (CUDA Graph) runs the whole schedule. PyTorch runs the same schedule but stops
+- **What is compared:** Tiny PyTorch (CUDA Graph) runs the whole schedule. PyTorch runs the same schedule but stops
   after epoch 10 (`--stop-epoch 10`), in eager mode and with `torch.compile` (default mode), so the two frameworks
   can be compared epoch by epoch over the first 10 epochs. ViT-Tiny is compared against `torch.compile` only.
 
@@ -357,7 +357,7 @@ downsampled to 64x64 (1000 classes, 1.28 M training images, 50k validation image
 Time per epoch is the median of epochs 2 and later. It covers the training steps of the epoch; the validation pass
 is not timed.
 
-| Network | TinyTensor | PyTorch eager | PyTorch torch.compile | TinyTensor vs torch.compile | TinyTensor final top-1 |
+| Network | Tiny PyTorch | PyTorch eager | PyTorch torch.compile | Tiny PyTorch vs torch.compile | Tiny PyTorch final top-1 |
 |---|---|---|---|---|---|
 | ViT-Tiny | **77.4 s** | - | 198.0 s | 2.56x faster | 56.54% (100 epochs) |
 | ResNet18 | **74.9 s** | 144.7 s | 104.2 s | 1.39x faster | 56.00% (60 epochs) |
@@ -369,7 +369,7 @@ torch.compile's first epoch also pays for compilation: 236 s (ViT-Tiny), 136 s (
 
 After 10 epochs of the same schedule, the two frameworks are at the same point:
 
-| Network | Train loss at epoch 10: TinyTensor / eager / compile | Val top-1 at epoch 10: TinyTensor / eager / compile |
+| Network | Train loss at epoch 10: Tiny PyTorch / eager / compile | Val top-1 at epoch 10: Tiny PyTorch / eager / compile |
 |---|---|---|
 | ViT-Tiny | 5.1562 / - / 5.1573 | 29.41% / - / 29.52% |
 | ResNet18 | 4.8094 / 4.8103 / 4.8113 | 35.37% / 36.16% / 35.31% |
@@ -377,7 +377,7 @@ After 10 epochs of the same schedule, the two frameworks are at the same point:
 | VGG16 | 4.8095 / 4.8099 / 4.8105 | 35.45% / 35.55% / 35.44% |
 
 Validation top-1. Top row: the first 10 epochs, all three configurations on the same schedule. Bottom row: the full
-TinyTensor runs.
+Tiny PyTorch runs.
 
 ![imagenet64 training](results/imagenet64_a100_training.png)
 
@@ -389,22 +389,22 @@ What the numbers say:
 
 - **Accuracy is the same in both frameworks.** Training loss at epoch 10 agrees to the fourth significant digit.
   Validation accuracy differs by less than one point, which is the run-to-run noise of bf16 rounding.
-- **TinyTensor is clearly faster on ViT-Tiny and ResNet18.**
-- **TinyTensor ties torch.compile on ResNeXt26 and loses on VGG16.** VGG16 is a plain stack of wide 3x3
-  convolutions, so its time is almost entirely convolution kernels, and cuDNN's are faster than TinyTensor's
+- **Tiny PyTorch is clearly faster on ViT-Tiny and ResNet18.**
+- **Tiny PyTorch ties torch.compile on ResNeXt26 and loses on VGG16.** VGG16 is a plain stack of wide 3x3
+  convolutions, so its time is almost entirely convolution kernels, and cuDNN's are faster than Tiny PyTorch's
   `ConvTc` (see the throughput table below). This is the main open speed item.
-- **Batch 128 favours TinyTensor.** At this batch size and image size a PyTorch step is short enough that the CPU
-  cost of launching it matters, and TinyTensor replays a CUDA Graph instead. In the batch-256 throughput table
+- **Batch 128 favours Tiny PyTorch.** At this batch size and image size a PyTorch step is short enough that the CPU
+  cost of launching it matters, and Tiny PyTorch replays a CUDA Graph instead. In the batch-256 throughput table
   below, where GPU kernels dominate, torch.compile is ahead on all three CNNs. PyTorch with a manual CUDA Graph or
   `reduce-overhead` was not measured in these training runs.
 - **All four accuracy curves are still rising at the last epoch.** The schedules are short for ImageNet.
 
-Wall time of the full TinyTensor runs: ResNet18 1 h 17 min, VGG16 1 h 51 min, ResNeXt26 2 h 32 min, ViT-Tiny
+Wall time of the full Tiny PyTorch runs: ResNet18 1 h 17 min, VGG16 1 h 51 min, ResNeXt26 2 h 32 min, ViT-Tiny
 2 h 12 min. Raw results: `results/imagenet64_a100/*.json`; charts: `results/plot_imagenet64.py`.
 
 ### Choosing the CNN hyperparameters
 
-ResNet18, TinyTensor, ImageNet64, top-1 on the validation set:
+ResNet18, Tiny PyTorch, ImageNet64, top-1 on the validation set:
 
 | lr | Weight decay | Regularization | Epochs | Val top-1 |
 |---|---|---|---|---|
@@ -435,16 +435,16 @@ python ../../tests/test_imagenet_match.py --arch vit_tiny --dtype bf16   # first
 python profile_imagenet.py --framework tiny --arch resnext26 --dtype bf16      # per-kernel GPU time
 ```
 
-Run the TinyTensor script first: it exports the initial weights that the PyTorch script loads. Results are written
+Run the Tiny PyTorch script first: it exports the initial weights that the PyTorch script loads. Results are written
 to `results/runs/imagenet/`.
 
 ## Throughput at batch 256 (A100, ms per step, lower is better)
 
 Measured with `--bench 50 --batch 256 --train-limit 51200` on Tiny ImageNet (same 64x64 input, 200 classes), with no
-regularization. All PyTorch columns and the TinyTensor eager column were measured in one session; the TinyTensor +
+regularization. All PyTorch columns and the Tiny PyTorch eager column were measured in one session; the Tiny PyTorch +
 CUDA Graph column is from a later session after more kernel work (see the log below).
 
-| Network | dtype | TinyTensor + CUDA Graph | TinyTensor eager | PyTorch eager | PyTorch + CUDA Graph | PyTorch torch.compile (best mode) |
+| Network | dtype | Tiny PyTorch + CUDA Graph | Tiny PyTorch eager | PyTorch eager | PyTorch + CUDA Graph | PyTorch torch.compile (best mode) |
 |---|---|---|---|---|---|---|
 | VGG16 | bf16 | 19.3 | 21.6 | 18.7 | 18.2 | **14.2** |
 | ResNet18 | bf16 | 12.6 | 13.6 | 13.4 | 12.6 | **10.0** |
@@ -463,29 +463,29 @@ The three PyTorch modes:
   kernels. Convolutions and GEMMs still go to cuDNN / cuBLAS. The table shows whichever of `default` and
   `max-autotune-no-cudagraphs` was faster.
 
-TinyTensor has no compiler. Its fusions are written by hand, and it captures its CUDA Graph explicitly. Its fair
+Tiny PyTorch has no compiler. Its fusions are written by hand, and it captures its CUDA Graph explicitly. Its fair
 counterpart is therefore torch.compile, and the main comparison is against the fastest PyTorch mode.
 
-Where TinyTensor stands at batch 256:
+Where Tiny PyTorch stands at batch 256:
 
-- **ViT-Tiny, bf16: TinyTensor is the fastest, 1.4x faster than torch.compile.**
+- **ViT-Tiny, bf16: Tiny PyTorch is the fastest, 1.4x faster than torch.compile.**
   - One kernel computes the whole attention for one (batch, head) in shared memory: Q·Kᵀ, softmax, then ·V.
   - LayerNorm takes a single pass.
   - Bias + GELU are fused into the GEMM epilogue.
 - **CNNs, bf16: about the same as PyTorch eager and CUDA Graph, but 1.25-1.45x slower than torch.compile.**
-  - The remaining gap is the convolutions: cuDNN's implicit-GEMM kernels are still faster than TinyTensor's
+  - The remaining gap is the convolutions: cuDNN's implicit-GEMM kernels are still faster than Tiny PyTorch's
     `ConvTc`.
-  - Example, a VGG layer with 64 channels: forward 0.22 ms (cuDNN) vs 0.36 ms (TinyTensor); weight gradient 0.36 ms
+  - Example, a VGG layer with 64 channels: forward 0.22 ms (cuDNN) vs 0.36 ms (Tiny PyTorch); weight gradient 0.36 ms
     vs 0.61 ms.
 - **CNNs, fp32: slower, except ResNeXt26.**
   - In fp32, cuDNN switches to Winograd (`scudnn_winograd_128x128`) and FFT (`fft2d_r2c`, `gcgemm`) convolutions.
     These do far fewer FLOPs than an implicit GEMM.
-  - TinyTensor's fp32 convolution is a plain implicit GEMM on CUDA cores.
-  - ResNeXt26 is dominated by grouped convolutions, where cuDNN has no such shortcut, and TinyTensor's direct
+  - Tiny PyTorch's fp32 convolution is a plain implicit GEMM on CUDA cores.
+  - ResNeXt26 is dominated by grouped convolutions, where cuDNN has no such shortcut, and Tiny PyTorch's direct
     grouped kernels win.
 
 ```bash
-python imagenet_train.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200          # TinyTensor
+python imagenet_train.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200          # Tiny PyTorch
 python torch_imagenet.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200 --graph
 python torch_imagenet.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200 --compile default
 python imagenet_train.py --arch resnet18 --dtype bf16 --batch 256 --bench 50 --train-limit 51200 --no-fuse
@@ -555,10 +555,10 @@ Notes:
 ### Earlier run: Tiny ImageNet, 30 epochs
 
 Before ImageNet64, the four networks were trained on Tiny ImageNet (200 classes, 100k training images) on the same
-A100 for 30 epochs without regularization (weight decay 5e-4 for the CNNs). TinyTensor uses CUDA Graph, PyTorch is
+A100 for 30 epochs without regularization (weight decay 5e-4 for the CNNs). Tiny PyTorch uses CUDA Graph, PyTorch is
 eager, top-1 on the validation set:
 
-| Network | dtype | TinyTensor | PyTorch |
+| Network | dtype | Tiny PyTorch | PyTorch |
 |---|---|---|---|
 | VGG16 | bf16 | 58.56% | 59.66% |
 | ResNet18 | bf16 | 59.74% | 59.96% |
