@@ -2,7 +2,7 @@
 
 # pku-aiprogramming
 
-Homework for course Programming in Artificial Intelligence, Peking University in 2023, and what grew out of it.
+Homework for course Programming in Artificial Intelligence, Peking University, Fall 2024, and what grew out of it.
 
 The course work builds a small deep-learning framework, **TinyTensor**, step by step: a CUDA tensor class, layers,
 Python bindings, automatic differentiation, optimizers, and finally MNIST training. That is **Part I (basics)**.
