@@ -149,8 +149,8 @@ From Windows, call WSL through PowerShell: `wsl -d Ubuntu-20.04 -- bash script.s
 
 # Part I: basics
 
-Five homeworks and a three-task final project. [`basics/README.md`](basics/README.md) describes each assignment, how
-to run it, and what had to be fixed. Every item was re-run locally (RTX 4060 Laptop, WSL2, the environment above):
+Five homeworks and a three-task final project. [`basics/README.md`](basics/README.md) describes each assignment and how
+to run it. Every item runs locally (RTX 4060 Laptop, WSL2, the environment above):
 
 | Item | What it is | Result |
 |---|---|---|
@@ -221,13 +221,8 @@ everything runs locally and reaches the same accuracy.
 | CNN | **PyTorch torch.compile (reduce-overhead)** | **0.697** | 98.86% |
 
 This run was made while the laptop held the GPU at 45-49 W (see "GPU utilization on the laptop" below), and the CNN
-numbers are noisy in that state: TinyTensor with CUDA Graph measured slower than TinyTensor op-by-op, which cannot
-happen with a steady clock, and a run of the same twelve configurations a few minutes earlier gave 0.651 (TinyTensor
-graph), 0.697 (op-by-op), 0.812 (PyTorch graph) and 0.585 (reduce-overhead). In both runs PyTorch with
-`reduce-overhead` is the fastest CNN configuration and TinyTensor is second. On the MLP TinyTensor with CUDA Graph is
-the fastest in both. An earlier run at full power, before the Python package was reorganized (same kernels, same
-kernel count per step), gave 0.031 s/epoch (MLP) and 0.281 s/epoch (CNN) for TinyTensor with CUDA Graph against 0.046
-and 0.352 for PyTorch with CUDA Graph and 0.566 for `reduce-overhead` on the CNN; its json files were not kept.
+timings are noisy in that state. On the MLP TinyTensor with CUDA Graph is the fastest configuration; on the CNN
+PyTorch with `reduce-overhead` is the fastest here and TinyTensor is second.
 
 ![mnist rtx4060](results/mnist/compare_rtx4060.png)
 
