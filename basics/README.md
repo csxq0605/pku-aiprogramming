@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # Part I: the course work
 
 Five homeworks and a three-task final project. Together they build a small deep-learning framework from the bottom

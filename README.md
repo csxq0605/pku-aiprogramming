@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # pku-aiprogramming
 
 Homework for course Programming in Artificial Intelligence, Peking University in 2023, and what grew out of it.
