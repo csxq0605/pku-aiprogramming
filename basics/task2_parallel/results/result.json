@@ -1,0 +1,1 @@
+{"num_gpus": 1, "epochs": 10, "seed": 0, "plain": {"train_seconds": 104.69665050506592, "test_accuracy": 98.64}, "data_parallel": {"train_seconds": 105.15582227706909, "test_accuracy": 98.66}}

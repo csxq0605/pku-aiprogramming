@@ -1,0 +1,98 @@
+{
+  "framework": "PyTorch 2.14.1+cu126 (cuda)",
+  "arch": "cnn",
+  "args": {
+    "epochs": 10,
+    "batch": 100,
+    "lr": 0.1,
+    "optimizer": "sgd",
+    "seed": 0,
+    "data": "/mnt/e/PKU/code_in_ai/Tinytensor/optimizer/data/MNIST/raw",
+    "save": "/mnt/e/PKU/code_in_ai/pku-aiprogramming/results/mnist/rtx4060/pytorch_cnn_eager.json",
+    "graph": false,
+    "chunk": 100,
+    "compile": null
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.07652135747273763,
+      "train_err": 0.02445,
+      "test_loss": 0.07416105461120605,
+      "test_err": 0.0255,
+      "epoch_time": 2.0279275169998527
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.05121662896474202,
+      "train_err": 0.015733333333333332,
+      "test_loss": 0.05709897508621216,
+      "test_err": 0.02,
+      "epoch_time": 0.9090189280000232
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.03057431429227193,
+      "train_err": 0.009616666666666667,
+      "test_loss": 0.04087869262695312,
+      "test_err": 0.0137,
+      "epoch_time": 0.901236494999921
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.025372832822799684,
+      "train_err": 0.007966666666666667,
+      "test_loss": 0.040209643936157224,
+      "test_err": 0.0135,
+      "epoch_time": 0.949289920999945
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.02118360063234965,
+      "train_err": 0.006633333333333333,
+      "test_loss": 0.039984910202026366,
+      "test_err": 0.0139,
+      "epoch_time": 1.0007505209998726
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.014531259254614511,
+      "train_err": 0.00395,
+      "test_loss": 0.03687392101287842,
+      "test_err": 0.0119,
+      "epoch_time": 0.9007329200001095
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.01717696549097697,
+      "train_err": 0.005916666666666666,
+      "test_loss": 0.040406632280349734,
+      "test_err": 0.0128,
+      "epoch_time": 0.952137257000004
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.012798037846883138,
+      "train_err": 0.004016666666666667,
+      "test_loss": 0.03819916472434998,
+      "test_err": 0.0116,
+      "epoch_time": 0.9292113189999327
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.00925887351433436,
+      "train_err": 0.0026666666666666666,
+      "test_loss": 0.03805725183486938,
+      "test_err": 0.0115,
+      "epoch_time": 0.9036641689999669
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.007668757426738739,
+      "train_err": 0.0019666666666666665,
+      "test_loss": 0.039702096128463746,
+      "test_err": 0.0121,
+      "epoch_time": 1.0599299650000376
+    }
+  ]
+}

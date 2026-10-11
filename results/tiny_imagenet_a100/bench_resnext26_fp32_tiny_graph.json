@@ -1,0 +1,19 @@
+{
+ "arch": "resnext26",
+ "dtype": "fp32",
+ "framework": "TinyTensor (graph)",
+ "batch": 256,
+ "optimizer": "sgd",
+ "lr": 0.1,
+ "wd": 0.0005,
+ "graph": true,
+ "chunk": 50,
+ "params": 13742600,
+ "bench_steps": 50,
+ "warmup_seconds": 8.728154303999872,
+ "seconds": 6.084487447999891,
+ "ms_per_step": 121.68974895999781,
+ "images_per_sec": 2103.710478391676,
+ "train_loss": 4.715414428710938,
+ "peak_mem_mb": 8596
+}

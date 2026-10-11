@@ -1,0 +1,13 @@
+build/
+*.egg-info/
+*.so
+*.pyd
+*.pth
+__pycache__/
+.pytest_cache/
+.vs/
+.vscode/
+pybind11/
+data/
+cifar/
+results/runs/
