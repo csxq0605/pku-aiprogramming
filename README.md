@@ -309,9 +309,9 @@ These observations come from `profile_step.py` (CUPTI timeline, no extra synchro
   time directly. That is why the CNN step went from 50 to 28 to 20 kernels: the fused kernels, one kernel for the
   batch gather and the counter, the weight-gradient memset folded into the pool backward, and a cuBLAS workspace of 0
   (which disables split-K and its extra `splitKreduce` kernels; `TT_CUBLAS_WS=<bytes>` re-enables it).
-- **Clocks depend on the power mode on this laptop.** Under the Windows "Balanced" power mode the driver holds the
-  card at 40-49 W, and the same benchmark measured up to 2.7x slower than in performance mode. Compare frameworks
-  only within one back-to-back run, as `bench.sh` does.
+- **Clocks depend on the power mode on this laptop.** Under the Windows "Balanced" power mode the driver caps the
+  card's power and the same code runs slower. Compare frameworks only within one back-to-back run, as `bench.sh`
+  does.
 
 # Part II: extensions
 
