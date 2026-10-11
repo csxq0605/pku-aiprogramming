@@ -199,6 +199,10 @@ training loop around them. TinyTensor initializes the weights itself: Kaiming un
 
 s/epoch is the mean of epochs 2-10, because epoch 1 includes CUDA Graph capture or torch.compile compilation.
 
+**The framework comparison should be read from the A100 table.** The laptop does not hold a steady GPU power state,
+so its timings are not a reliable basis for ranking the frameworks; the laptop table is kept only to show that
+everything runs locally and reaches the same accuracy.
+
 **RTX 4060 Laptop, WSL2** (`results/mnist/rtx4060/`):
 
 | Model | Mode | s/epoch | Test acc |
